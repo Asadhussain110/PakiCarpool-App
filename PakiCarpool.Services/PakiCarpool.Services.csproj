@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>PakiCarpool.Services</RootNamespace>
+    <AssemblyName>PakiCarpool.Services</AssemblyName>
+  </PropertyGroup>
+
+  <!-- Dependency rule: Services → Interfaces, Domain, Security, Common -->
+  <ItemGroup>
+    <ProjectReference Include="..\PakiCarpool.Common\PakiCarpool.Common.csproj" />
+    <ProjectReference Include="..\PakiCarpool.Domain\PakiCarpool.Domain.csproj" />
+    <ProjectReference Include="..\PakiCarpool.Interfaces\PakiCarpool.Interfaces.csproj" />
+    <ProjectReference Include="..\PakiCarpool.Repository\PakiCarpool.Repository.csproj" />
+    <ProjectReference Include="..\PakiCarpool.Security\PakiCarpool.Security.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- AspNetCore framework: needed for IHubContext<>, IHostedService, IConfiguration -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Google OAuth token validation -->
+    <PackageReference Include="Google.Apis.Auth" Version="1.68.0" />
+  </ItemGroup>
+
+</Project>

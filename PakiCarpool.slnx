@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="PakiCarpool.Domain\PakiCarpool.Domain.csproj" />
+  <Project Path="PakiCarpool.Common\PakiCarpool.Common.csproj" />
+  <Project Path="PakiCarpool.Interfaces\PakiCarpool.Interfaces.csproj" />
+  <Project Path="PakiCarpool.Security\PakiCarpool.Security.csproj" />
+  <Project Path="PakiCarpool.Repository\PakiCarpool.Repository.csproj" />
+  <Project Path="PakiCarpool.Services\PakiCarpool.Services.csproj" />
+  <Project Path="PakiCarpool.API\PakiCarpool.API.csproj" />
+</Solution>

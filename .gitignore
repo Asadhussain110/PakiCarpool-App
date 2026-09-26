@@ -1,0 +1,7 @@
+**/bin/
+**/obj/
+**/graphify-out/
+appsettings.json
+*.env
+.env
+.DS_Store

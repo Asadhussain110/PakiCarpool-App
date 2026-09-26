@@ -1,0 +1,105 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{571F9D1E-B014-DAF5-8A5A-F2C3599C0AC4}|PakiCarpool.Common\\PakiCarpool.Common.csproj|c:\\users\\asad\\onedrive\\desktop\\pakicarpool\\pakicarpool.common\\pakicarpool.common.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}",
+      "RelativeMoniker": "D:0:0:{571F9D1E-B014-DAF5-8A5A-F2C3599C0AC4}|PakiCarpool.Common\\PakiCarpool.Common.csproj|solutionrelative:pakicarpool.common\\pakicarpool.common.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3CAF687C-FCC0-F898-CC50-6D37F841D5CD}|PakiCarpool.Domain\\PakiCarpool.Domain.csproj|c:\\users\\asad\\onedrive\\desktop\\pakicarpool\\pakicarpool.domain\\pakicarpool.domain.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}",
+      "RelativeMoniker": "D:0:0:{3CAF687C-FCC0-F898-CC50-6D37F841D5CD}|PakiCarpool.Domain\\PakiCarpool.Domain.csproj|solutionrelative:pakicarpool.domain\\pakicarpool.domain.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{8202CC10-6C4A-D91F-5A66-9D16954C2841}|PakiCarpool.Interfaces\\PakiCarpool.Interfaces.csproj|c:\\users\\asad\\onedrive\\desktop\\pakicarpool\\pakicarpool.interfaces\\pakicarpool.interfaces.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}",
+      "RelativeMoniker": "D:0:0:{8202CC10-6C4A-D91F-5A66-9D16954C2841}|PakiCarpool.Interfaces\\PakiCarpool.Interfaces.csproj|solutionrelative:pakicarpool.interfaces\\pakicarpool.interfaces.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{0F576748-6322-21CA-9774-AE80C11F6D1C}|PakiCarpool.Repository\\PakiCarpool.Repository.csproj|c:\\users\\asad\\onedrive\\desktop\\pakicarpool\\pakicarpool.repository\\pakicarpool.repository.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}",
+      "RelativeMoniker": "D:0:0:{0F576748-6322-21CA-9774-AE80C11F6D1C}|PakiCarpool.Repository\\PakiCarpool.Repository.csproj|solutionrelative:pakicarpool.repository\\pakicarpool.repository.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{1E01DAFF-E918-0D2A-EDEF-CA726786381C}|PakiCarpool.Security\\PakiCarpool.Security.csproj|c:\\users\\asad\\onedrive\\desktop\\pakicarpool\\pakicarpool.security\\pakicarpool.security.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}",
+      "RelativeMoniker": "D:0:0:{1E01DAFF-E918-0D2A-EDEF-CA726786381C}|PakiCarpool.Security\\PakiCarpool.Security.csproj|solutionrelative:pakicarpool.security\\pakicarpool.security.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 0,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "PakiCarpool.Common",
+              "DocumentMoniker": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Common\\PakiCarpool.Common.csproj",
+              "RelativeDocumentMoniker": "PakiCarpool.Common\\PakiCarpool.Common.csproj",
+              "ToolTip": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Common\\PakiCarpool.Common.csproj",
+              "RelativeToolTip": "PakiCarpool.Common\\PakiCarpool.Common.csproj",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000758|",
+              "WhenOpened": "2026-08-03T01:47:29.728Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "PakiCarpool.Domain",
+              "DocumentMoniker": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Domain\\PakiCarpool.Domain.csproj",
+              "RelativeDocumentMoniker": "PakiCarpool.Domain\\PakiCarpool.Domain.csproj",
+              "ToolTip": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Domain\\PakiCarpool.Domain.csproj",
+              "RelativeToolTip": "PakiCarpool.Domain\\PakiCarpool.Domain.csproj",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000758|",
+              "WhenOpened": "2026-08-03T01:47:29.7Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "PakiCarpool.Interfaces",
+              "DocumentMoniker": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Interfaces\\PakiCarpool.Interfaces.csproj",
+              "RelativeDocumentMoniker": "PakiCarpool.Interfaces\\PakiCarpool.Interfaces.csproj",
+              "ToolTip": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Interfaces\\PakiCarpool.Interfaces.csproj",
+              "RelativeToolTip": "PakiCarpool.Interfaces\\PakiCarpool.Interfaces.csproj",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000758|",
+              "WhenOpened": "2026-08-03T01:47:29.673Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "PakiCarpool.Repository",
+              "DocumentMoniker": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Repository\\PakiCarpool.Repository.csproj",
+              "RelativeDocumentMoniker": "PakiCarpool.Repository\\PakiCarpool.Repository.csproj",
+              "ToolTip": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Repository\\PakiCarpool.Repository.csproj",
+              "RelativeToolTip": "PakiCarpool.Repository\\PakiCarpool.Repository.csproj",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000758|",
+              "WhenOpened": "2026-08-03T01:47:29.643Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "PakiCarpool.Security",
+              "DocumentMoniker": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Security\\PakiCarpool.Security.csproj",
+              "RelativeDocumentMoniker": "PakiCarpool.Security\\PakiCarpool.Security.csproj",
+              "ToolTip": "C:\\Users\\Asad\\OneDrive\\Desktop\\PAKICARPOOL\\PakiCarpool.Security\\PakiCarpool.Security.csproj",
+              "RelativeToolTip": "PakiCarpool.Security\\PakiCarpool.Security.csproj",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000758|",
+              "WhenOpened": "2026-08-03T01:47:29.354Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
