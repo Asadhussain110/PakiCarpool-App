@@ -4,7 +4,7 @@ namespace PakiCarpool.Interfaces.IServices;
 
 /// <summary>
 /// Defines notification delivery operations across three channels:
-/// in-app (SignalR), email (Brevo SMTP), and phone (in-app push simulation).
+/// in-app (SignalR), email (SMTP via IEmailService), and phone (in-app push simulation).
 /// Structured to allow FCM plug-in later without changing callers.
 /// </summary>
 public interface INotificationService
@@ -12,7 +12,7 @@ public interface INotificationService
     /// <summary>
     /// Sends an in-app notification via SignalR to the user's personal group.
     /// </summary>
-    Task SendInAppNotificationAsync(Guid userId, NotificationType type, string title, string message);
+    Task SendInAppNotificationAsync(Guid userId, NotificationType type, string title, string message, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sends an in-app notification to a group of users.
@@ -24,6 +24,9 @@ public interface INotificationService
     /// Determines which channels to use based on the NotificationType.
     /// </summary>
     Task SendNotificationAsync(Guid userId, NotificationType type, string title, string message, object? additionalData = null);
+
+    /// <summary>Removes a passenger's active ride-group connections.</summary>
+    Task RemovePassengerFromRideGroupsAsync(Guid rideId, Guid passengerId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sends a phone push simulation notification via SignalR.

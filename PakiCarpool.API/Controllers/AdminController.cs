@@ -5,6 +5,7 @@ using PakiCarpool.Common.Constants;
 using PakiCarpool.Domain.DTOs.Admin;
 using PakiCarpool.Domain.DTOs.Common;
 using PakiCarpool.Domain.DTOs.Driver;
+using PakiCarpool.Interfaces.IRepositories;
 using PakiCarpool.Interfaces.IServices;
 using PakiCarpool.Security.Policies;
 
@@ -19,10 +20,17 @@ namespace PakiCarpool.API.Controllers;
 public sealed class AdminController : ApiControllerBase
 {
     private readonly IAdminService _adminService;
+    private readonly IUserRepository _userRepository;
+    private readonly IStorageService _storageService;
 
-    public AdminController(IAdminService adminService)
+    public AdminController(
+        IAdminService adminService,
+        IUserRepository userRepository,
+        IStorageService storageService)
     {
         _adminService = adminService;
+        _userRepository = userRepository;
+        _storageService = storageService;
     }
 
     /// <summary>GET /admin/dashboard — Summary metrics.</summary>
@@ -61,6 +69,48 @@ public sealed class AdminController : ApiControllerBase
     public async Task<IActionResult> GetDriverApprovals()
         => FromResponse(await _adminService.GetPendingCarApprovalsAsync());
 
+    /// <summary>GET /admin/driver-approvals/{carId}/registration-document — Issue a short-lived private document URL.</summary>
+    [HttpGet("driver-approvals/{carId:guid}/registration-document")]
+    [ProducesResponseType(typeof(ApiResponse<RegistrationDocumentUrlDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetRegistrationDocumentUrl(
+        Guid carId,
+        CancellationToken cancellationToken)
+    {
+        var car = await _userRepository.GetDriverCarByIdAsync(carId);
+        if (car is null)
+        {
+            return NotFound(ErrorResponse.Create(
+                StatusCodes.Status404NotFound,
+                ErrorCodes.NotFound,
+                "Car not found."));
+        }
+
+        var expectedPrefix = $"private://driver-registration-documents/{car.Driver.UserId:D}/";
+        if (!car.RegDocPath.StartsWith(expectedPrefix, StringComparison.Ordinal))
+        {
+            return NotFound(ErrorResponse.Create(
+                StatusCodes.Status404NotFound,
+                ErrorCodes.NotFound,
+                "Private registration document not found."));
+        }
+
+        var signedUrl = await _storageService.CreatePrivateCarDocumentSignedUrlAsync(
+            car.RegDocPath,
+            cancellationToken);
+        return Ok(new
+        {
+            data = new RegistrationDocumentUrlDto { Url = signedUrl },
+            message = "A short-lived registration document URL was created."
+        });
+    }
+
+    [HttpGet("liveness-reviews")]
+    [ProducesResponseType(typeof(ApiResponse<PaginatedResult<LivenessReviewDto>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetLivenessReviews(
+        [FromQuery] PaginationParams pagination,
+        CancellationToken cancellationToken)
+        => FromResponse(await _adminService.GetPendingLivenessReviewsAsync(pagination, cancellationToken));
+
     /// <summary>PUT /admin/driver-approvals/{carId}/approve — Approve car.</summary>
     [HttpPut("driver-approvals/{carId:guid}/approve")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
@@ -73,11 +123,13 @@ public sealed class AdminController : ApiControllerBase
     public async Task<IActionResult> RejectCar(Guid carId, [FromBody] RejectCarDto dto)
         => FromResponse(await _adminService.RejectCarAsync(carId, dto));
 
-    /// <summary>PUT /admin/drivers/{driverId}/manual-verify — Manual liveness approval.</summary>
-    [HttpPut("drivers/{driverId:guid}/manual-verify")]
+    [HttpPut("drivers/{driverId:guid}/liveness/reject")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> ManualVerifyDriver(Guid driverId)
-        => FromResponse(await _adminService.ManualVerifyDriverAsync(driverId));
+    public async Task<IActionResult> RejectLiveness(
+        Guid driverId,
+        [FromBody] RejectLivenessDto dto,
+        CancellationToken cancellationToken)
+        => FromResponse(await _adminService.RejectLivenessSubmissionAsync(driverId, dto, cancellationToken));
 
     /// <summary>GET /admin/rides — All rides.</summary>
     [HttpGet("rides")]

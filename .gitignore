@@ -1,6 +1,7 @@
 **/bin/
 **/obj/
 **/graphify-out/
+PakiCarpool.API/uploads/
 appsettings.json
 *.env
 .env

@@ -13,5 +13,8 @@ public class RefreshToken
     public bool IsRevoked { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>The signed iat boundary of the access token paired with this refresh token.</summary>
+    public DateTime SessionIssuedAt { get; set; }
+
     public User User { get; set; } = null!;
 }

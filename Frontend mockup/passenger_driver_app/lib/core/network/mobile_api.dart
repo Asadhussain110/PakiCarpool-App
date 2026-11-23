@@ -20,7 +20,12 @@ class MobileApi {
   Future<Map<String, dynamic>> getData(
     String path, {
     Map<String, dynamic>? query,
-  }) => _send(() => client.get(path, queryParameters: query));
+  }) => _send(path, () => client.get(path, queryParameters: query));
+
+  Future<Map<String, dynamic>> getBareData(
+    String path, {
+    Map<String, dynamic>? query,
+  }) => _send(path, () => client.get(path, queryParameters: query), bare: true);
 
   Future<List<Map<String, dynamic>>> getListData(
     String path, {
@@ -38,13 +43,16 @@ class MobileApi {
   }
 
   Future<Map<String, dynamic>> postData(String path, {Object? body}) =>
-      _send(() => client.post(path, data: body));
+      _send(path, () => client.post(path, data: body));
+
+  Future<Map<String, dynamic>> postBareData(String path, {Object? body}) =>
+      _send(path, () => client.post(path, data: body), bare: true);
 
   Future<Map<String, dynamic>> putData(String path, {Object? body}) =>
-      _send(() => client.put(path, data: body));
+      _send(path, () => client.put(path, data: body));
 
   Future<Map<String, dynamic>> deleteData(String path, {Object? body}) =>
-      _send(() => client.delete(path, data: body));
+      _send(path, () => client.delete(path, data: body));
 
   Future<List<Map<String, dynamic>>> getItems(
     String path, {
@@ -66,10 +74,15 @@ class MobileApi {
   );
 
   Future<Map<String, dynamic>> _send(
-    Future<Response<dynamic>> Function() request,
-  ) async {
+    String path,
+    Future<Response<dynamic>> Function() request, {
+    bool bare = false,
+  }) async {
     try {
       final response = await request();
+      if (bare || _isBareLivenessPath(path)) {
+        return _map(response.data);
+      }
       final envelope = _map(response.data);
       return _map(envelope['data']);
     } on DioException catch (error) {
@@ -77,6 +90,14 @@ class MobileApi {
       throw ApiFailure.fromDio(error);
     }
   }
+}
+
+bool _isBareLivenessPath(String path) {
+  final cleanPath = path.replaceFirst(RegExp(r'^/'), '');
+  return switch (cleanPath) {
+    'driver/liveness/challenge' || 'driver/liveness' => true,
+    _ => false,
+  };
 }
 
 Map<String, dynamic> _map(Object? value) {

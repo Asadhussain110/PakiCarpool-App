@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using PakiCarpool.Common.Constants;
+using PakiCarpool.Security.Helpers;
 
 namespace PakiCarpool.Security.Policies;
 
@@ -13,6 +14,12 @@ public static class RolePolicy
     public const string DriverPolicy = "DriverOnly";
     public const string AdminPolicy = "AdminOnly";
     public const string PassengerOrDriverPolicy = "PassengerOrDriver";
+    public const string SignalRPolicy = "SignalRAuthenticated";
+
+    /// <summary>
+    /// Policy for liveness endpoints. Requires a driver partial token pending verification.
+    /// </summary>
+    public const string RequiresLivenessPending = "RequiresLivenessPending";
 
     /// <summary>
     /// Registers all role-based authorization policies.
@@ -24,12 +31,26 @@ public static class RolePolicy
             policy.RequireRole(RoleNames.Passenger));
 
         options.AddPolicy(DriverPolicy, policy =>
-            policy.RequireRole(RoleNames.Driver));
+            policy.RequireRole(RoleNames.Driver)
+                  .RequireAssertion(context =>
+                      !context.User.HasClaim(JwtHelper.LivenessPendingClaim, "true")));
 
         options.AddPolicy(AdminPolicy, policy =>
-            policy.RequireRole(RoleNames.Admin));
+            policy.RequireRole(RoleNames.Admin)
+                  .RequireAssertion(context => !context.User.HasClaim("adminStep1", "true")));
 
         options.AddPolicy(PassengerOrDriverPolicy, policy =>
-            policy.RequireRole(RoleNames.Passenger, RoleNames.Driver));
+            policy.RequireRole(RoleNames.Passenger, RoleNames.Driver)
+                  .RequireAssertion(context =>
+                      !context.User.HasClaim(JwtHelper.LivenessPendingClaim, "true")));
+
+        options.AddPolicy(SignalRPolicy, policy =>
+            policy.RequireAuthenticatedUser()
+                  .RequireAssertion(context =>
+                      !context.User.HasClaim(JwtHelper.LivenessPendingClaim, "true")));
+
+        options.AddPolicy(RequiresLivenessPending, policy =>
+            policy.RequireRole(RoleNames.Driver)
+                  .RequireClaim(JwtHelper.LivenessPendingClaim, "true"));
     }
 }

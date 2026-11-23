@@ -25,13 +25,13 @@ public sealed class FlagController : ApiControllerBase
     [HttpPost("api/v1/driver/flags")]
     [Authorize(Policy = RolePolicy.DriverPolicy)]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> FlagPassenger([FromBody] FlagDto dto)
-        => FromResponse(await _flagService.CreateFlagAsync(GetUserId(), dto));
+    public async Task<IActionResult> FlagPassenger([FromBody] FlagDto dto, CancellationToken cancellationToken)
+        => FromResponse(await _flagService.CreateFlagAsync(GetUserId(), dto, cancellationToken));
 
     /// <summary>POST /passenger/flags — Passenger flags a driver.</summary>
     [HttpPost("api/v1/passenger/flags")]
     [Authorize(Policy = RolePolicy.PassengerPolicy)]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> FlagDriver([FromBody] FlagDto dto)
-        => FromResponse(await _flagService.CreateFlagAsync(GetUserId(), dto));
+    public async Task<IActionResult> FlagDriver([FromBody] FlagDto dto, CancellationToken cancellationToken)
+        => FromResponse(await _flagService.CreateFlagAsync(GetUserId(), dto, cancellationToken));
 }

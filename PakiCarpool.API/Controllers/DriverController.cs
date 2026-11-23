@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using PakiCarpool.API.Helpers;
+using PakiCarpool.Common.Constants;
 using PakiCarpool.Domain.DTOs.Common;
 using PakiCarpool.Domain.DTOs.Driver;
 using PakiCarpool.Interfaces.IServices;
@@ -17,10 +18,77 @@ namespace PakiCarpool.API.Controllers;
 public sealed class DriverController : ApiControllerBase
 {
     private readonly IDriverService _driverService;
+    private readonly IStorageService _storageService;
 
-    public DriverController(IDriverService driverService)
+    public DriverController(IDriverService driverService, IStorageService storageService)
     {
         _driverService = driverService;
+        _storageService = storageService;
+    }
+
+    /// <summary>POST /driver/car/documents — Upload a car photo or registration image.</summary>
+    [HttpPost("car/documents")]
+    [RequestSizeLimit(6 * 1024 * 1024)]
+    [ProducesResponseType(typeof(ApiResponse<CarDocumentUploadResponseDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> UploadCarDocument(
+        [FromForm] IFormFile file,
+        [FromForm] string documentType,
+        CancellationToken cancellationToken)
+    {
+        const long maxImageSize = 5 * 1024 * 1024;
+        if (file is null || file.Length is 0 or > maxImageSize)
+            return BadRequest(ErrorResponse.Create(
+                StatusCodes.Status400BadRequest,
+                ErrorCodes.ValidationError,
+                "Choose a non-empty image no larger than 5 MB."));
+
+        await using var stream = new MemoryStream();
+        await file.CopyToAsync(stream, cancellationToken);
+        var bytes = stream.ToArray();
+        var isJpeg = bytes.Length >= 3
+            && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
+        var isPng = bytes.AsSpan().StartsWith(
+            new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+        var contentType = isJpeg ? "image/jpeg" : isPng ? "image/png" : null;
+        if (contentType is null)
+            return BadRequest(ErrorResponse.Create(
+                StatusCodes.Status400BadRequest,
+                ErrorCodes.ValidationError,
+                "Only valid JPEG and PNG images are supported."));
+
+        string path;
+        if (string.Equals(documentType, "registration", StringComparison.OrdinalIgnoreCase))
+        {
+            path = await _storageService.UploadPrivateCarDocumentAsync(
+                GetUserId(),
+                bytes,
+                contentType,
+                cancellationToken);
+        }
+        else if (string.Equals(documentType, "carPhoto", StringComparison.OrdinalIgnoreCase))
+        {
+            var extension = contentType == "image/jpeg" ? "jpg" : "png";
+            var objectName = $"{GetUserId():D}/{Guid.NewGuid():N}.{extension}";
+            path = await _storageService.UploadAsync(
+                "driver-cars",
+                objectName,
+                bytes,
+                contentType,
+                cancellationToken);
+        }
+        else
+        {
+            return BadRequest(ErrorResponse.Create(
+                StatusCodes.Status400BadRequest,
+                ErrorCodes.ValidationError,
+                "documentType must be 'carPhoto' or 'registration'."));
+        }
+
+        return Ok(new
+        {
+            data = new CarDocumentUploadResponseDto { Path = path },
+            message = "Image uploaded."
+        });
     }
 
     /// <summary>POST /driver/car — Register car.</summary>
@@ -61,42 +129,58 @@ public sealed class DriverController : ApiControllerBase
 
     /// <summary>GET /driver/rides/{rideId}/bookings — List bookings on a ride.</summary>
     [HttpGet("rides/{rideId:guid}/bookings")]
-    [ProducesResponseType(typeof(ApiResponse<List<BookingDetailDto>>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetRideBookings(Guid rideId)
-        => FromResponse(await _driverService.GetRideBookingsAsync(GetUserId(), rideId));
+    [ProducesResponseType(typeof(ApiResponse<PaginatedResult<BookingDetailDto>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetRideBookings(
+        Guid rideId,
+        [FromQuery] PaginationParams pagination)
+    {
+        if (!Request.Query.ContainsKey(nameof(PaginationParams.PageSize)))
+            pagination.PageSize = 50;
+
+        return FromResponse(await _driverService.GetRideBookingsAsync(
+            GetUserId(),
+            rideId,
+            pagination));
+    }
 
     /// <summary>PUT /driver/bookings/{bookingId}/accept — Accept booking.</summary>
-    [HttpPut("bookings/{bookingId:guid}/accept")]
+    [HttpPost("bookings/{bookingId:guid}/accept")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
     public async Task<IActionResult> AcceptBooking(Guid bookingId)
         => FromResponse(await _driverService.AcceptBookingAsync(GetUserId(), bookingId));
 
     /// <summary>PUT /driver/bookings/{bookingId}/reject — Reject booking.</summary>
-    [HttpPut("bookings/{bookingId:guid}/reject")]
+    [HttpPost("bookings/{bookingId:guid}/reject")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
     public async Task<IActionResult> RejectBooking(Guid bookingId)
         => FromResponse(await _driverService.RejectBookingAsync(GetUserId(), bookingId));
 
     /// <summary>PUT /driver/bookings/{bookingId}/no-show — Mark passenger no-show.</summary>
-    [HttpPut("bookings/{bookingId:guid}/no-show")]
+    [HttpPost("bookings/{bookingId:guid}/no-show")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> MarkPassengerNoShow(Guid bookingId)
-        => FromResponse(await _driverService.MarkPassengerNoShowAsync(GetUserId(), bookingId));
+    public async Task<IActionResult> MarkPassengerNoShow(Guid bookingId, CancellationToken cancellationToken)
+        => FromResponse(await _driverService.MarkPassengerNoShowAsync(GetUserId(), bookingId, cancellationToken));
 
     /// <summary>PUT /driver/bookings/{bookingId}/end-ride — End ride for passenger.</summary>
-    [HttpPut("bookings/{bookingId:guid}/end-ride")]
+    [HttpPost("bookings/{bookingId:guid}/end-ride")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
     public async Task<IActionResult> EndRide(Guid bookingId)
         => FromResponse(await _driverService.EndRideForPassengerAsync(GetUserId(), bookingId));
 
     /// <summary>PUT /driver/bookings/{bookingId}/cash-received — Confirm cash.</summary>
-    [HttpPut("bookings/{bookingId:guid}/cash-received")]
+    [HttpPost("bookings/{bookingId:guid}/cash-received")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
     public async Task<IActionResult> CashReceived(Guid bookingId)
         => FromResponse(await _driverService.ConfirmCashReceivedAsync(GetUserId(), bookingId));
 
+    /// <summary>PUT /driver/stops/{stopId}/begin-travel — Begin travelling to the next stop.</summary>
+    [HttpPost("stops/{stopId:guid}/begin-travel")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> BeginStopTravel(Guid stopId)
+        => FromResponse(await _driverService.BeginStopTravelAsync(GetUserId(), stopId));
+
     /// <summary>PUT /driver/stops/{stopId}/arrive — Mark stop arrived.</summary>
-    [HttpPut("stops/{stopId:guid}/arrive")]
+    [HttpPost("stops/{stopId:guid}/arrive")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ArriveAtStop(Guid stopId)
         => FromResponse(await _driverService.MarkStopArrivedAsync(GetUserId(), stopId));
@@ -107,8 +191,8 @@ public sealed class DriverController : ApiControllerBase
     public async Task<IActionResult> UpdateLocation([FromBody] DriverLocationDto dto)
         => FromResponse(await _driverService.UpdateLocationAsync(GetUserId(), dto));
 
-    /// <summary>PUT /driver/bookings/{bookingId}/iam-here — Send arrival notification to passenger.</summary>
-    [HttpPut("bookings/{bookingId:guid}/iam-here")]
+    /// <summary>PUT /driver/bookings/{bookingId}/driver-arrived — Send arrival notification to passenger.</summary>
+    [HttpPost("bookings/{bookingId:guid}/driver-arrived")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
     public async Task<IActionResult> IAmHere(Guid bookingId)
         => FromResponse(await _driverService.NotifyIAmHereAsync(GetUserId(), bookingId));

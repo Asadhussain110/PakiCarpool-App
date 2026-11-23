@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
 using PakiCarpool.Common.Constants;
 using PakiCarpool.Domain.DTOs.Common;
 using PakiCarpool.Domain.DTOs.Driver;
@@ -7,6 +8,7 @@ using PakiCarpool.Domain.Enums;
 using PakiCarpool.Domain.Models;
 using PakiCarpool.Interfaces.IRepositories;
 using PakiCarpool.Interfaces.IServices;
+using PakiCarpool.Repository.EFCore;
 
 namespace PakiCarpool.Services.Implementations;
 
@@ -18,26 +20,32 @@ namespace PakiCarpool.Services.Implementations;
 public class PassengerService : IPassengerService
 {
     private readonly IUserRepository _userRepository;
+    private readonly PakiCarpoolDbContext _context;
     private readonly IRideRepository _rideRepository;
     private readonly IBookingRepository _bookingRepository;
     private readonly INotificationService _notificationService;
+    private readonly IFlagService _flagService;
     private readonly ITrustService _trustService;
     private readonly IEmailService _emailService;
     private readonly IHubContext<Microsoft.AspNetCore.SignalR.Hub> _hubContext;
 
     public PassengerService(
         IUserRepository userRepository,
+        PakiCarpoolDbContext context,
         IRideRepository rideRepository,
         IBookingRepository bookingRepository,
         INotificationService notificationService,
+        IFlagService flagService,
         ITrustService trustService,
         IEmailService emailService,
         IHubContext<Microsoft.AspNetCore.SignalR.Hub> hubContext)
     {
         _userRepository = userRepository;
+        _context = context;
         _rideRepository = rideRepository;
         _bookingRepository = bookingRepository;
         _notificationService = notificationService;
+        _flagService = flagService;
         _trustService = trustService;
         _emailService = emailService;
         _hubContext = hubContext;
@@ -51,14 +59,17 @@ public class PassengerService : IPassengerService
         var (items, totalCount) = await _rideRepository.GetAvailableRidesPaginatedAsync(
             pagination.Page, pagination.PageSize);
 
-        var mapped = new List<RideResponseDto>();
+        var rideIds = items.Select(ride => ride.Id).ToArray();
+        var locationsByDriverAndRide = (await _context.DriverLocations
+                .AsNoTracking()
+                .Where(location => rideIds.Contains(location.RideId))
+                .ToListAsync())
+            .ToDictionary(location => (location.DriverId, location.RideId));
+
+        var mapped = new List<RideResponseDto>(items.Count);
         foreach (var ride in items)
         {
-            DriverLocation? driverLocation = null;
-            if (ride.DriverId != Guid.Empty)
-            {
-                driverLocation = await _rideRepository.GetDriverLocationAsync(ride.DriverId, ride.Id);
-            }
+            locationsByDriverAndRide.TryGetValue((ride.DriverId, ride.Id), out var driverLocation);
             mapped.Add(MapRideToResponseDto(ride, driverLocation));
         }
 
@@ -102,50 +113,88 @@ public class PassengerService : IPassengerService
         if (passenger.IsSuspended || !passenger.IsActive)
             return new ApiResponse<object> { Message = ErrorCodes.AccountSuspended };
 
-        var existingBooking = await _bookingRepository.GetActiveBookingByPassengerIdAsync(passengerId);
-        if (existingBooking is not null)
-            return new ApiResponse<object> { Message = ErrorCodes.ActiveBookingExists };
-
-        var ride = await _rideRepository.GetByIdAsync(dto.RideId, includeStops: true, includeBookings: true);
-        if (ride is null)
-            return new ApiResponse<object> { Message = ErrorCodes.NotFound };
-
-        if (ride.Status is not RideStatus.Posted and not RideStatus.Active)
-            return new ApiResponse<object> { Message = "This ride is no longer available for booking." };
-
-        var pickupStop = ride.Stops?.FirstOrDefault(s => s.Id == dto.PickupStopId);
-        var dropoffStop = ride.Stops?.FirstOrDefault(s => s.Id == dto.DropoffStopId);
-
-        if (pickupStop is null || dropoffStop is null)
-            return new ApiResponse<object> { Message = "Invalid pickup or dropoff stop for this ride." };
-
-        if (pickupStop.IsCompleted)
-            return new ApiResponse<object> { Message = ErrorCodes.StopAlreadyPassed };
-
-        if (dropoffStop.SequenceOrder <= pickupStop.SequenceOrder)
-            return new ApiResponse<object>
-            {
-                Message = "Dropoff stop must be after the pickup stop in the route sequence."
-            };
-
-        var overlapping = await _bookingRepository.GetOverlappingBookingCountAsync(
-            ride.Id, pickupStop.SequenceOrder, dropoffStop.SequenceOrder);
-
-        if (overlapping >= ride.MaxSeats)
-            return new ApiResponse<object> { Message = ErrorCodes.StopSegmentFull };
-
-        var booking = new Booking
+        Ride ride;
+        RideStop pickupStop;
+        RideStop dropoffStop;
+        Booking created;
+        await using (var transaction = await _context.Database.BeginTransactionAsync())
         {
-            Id = Guid.NewGuid(),
-            RideId = ride.Id,
-            PassengerId = passengerId,
-            PickupStopId = pickupStop.Id,
-            DropoffStopId = dropoffStop.Id,
-            Status = BookingStatus.Pending,
-            RequestedAt = DateTime.UtcNow
-        };
+            async Task<ApiResponse<object>> RollbackWithErrorAsync(string message)
+            {
+                await transaction.RollbackAsync();
+                return new ApiResponse<object> { Message = message };
+            }
 
-        var created = await _bookingRepository.CreateAsync(booking);
+            try
+            {
+                var existingBooking = await _bookingRepository.GetActiveBookingByPassengerIdAsync(passengerId);
+                if (existingBooking is not null)
+                    return await RollbackWithErrorAsync(ErrorCodes.ActiveBookingExists);
+
+                var loadedRide = await _rideRepository.GetByIdAsync(dto.RideId, includeStops: true, includeBookings: true);
+                if (loadedRide is null)
+                    return await RollbackWithErrorAsync(ErrorCodes.NotFound);
+                ride = loadedRide;
+
+                if (ride.Status is not RideStatus.Posted and not RideStatus.Active)
+                    return await RollbackWithErrorAsync("This ride is no longer available for booking.");
+
+                pickupStop = ride.Stops?.FirstOrDefault(s => s.Id == dto.PickupStopId)!;
+                dropoffStop = ride.Stops?.FirstOrDefault(s => s.Id == dto.DropoffStopId)!;
+
+                if (pickupStop is null || dropoffStop is null)
+                    return await RollbackWithErrorAsync("Invalid pickup or dropoff stop for this ride.");
+
+                if (pickupStop.Status != RideStopStatus.Upcoming)
+                    return await RollbackWithErrorAsync(ErrorCodes.StopAlreadyPassed);
+
+                if (dropoffStop.Status != RideStopStatus.Upcoming)
+                    return await RollbackWithErrorAsync("Invalid pickup or dropoff stop for this ride.");
+
+                if (dropoffStop.SequenceOrder <= pickupStop.SequenceOrder)
+                    return await RollbackWithErrorAsync("Dropoff stop must be after the pickup stop in the route sequence.");
+
+                var overlapping = await (
+                      from capacityBooking in _context.Bookings
+                      join bookingPickup in _context.RideStops on capacityBooking.PickupStopId equals bookingPickup.Id
+                      join bookingDropoff in _context.RideStops on capacityBooking.DropoffStopId equals bookingDropoff.Id
+                      where capacityBooking.RideId == ride.Id &&
+                          (capacityBooking.Status == BookingStatus.Accepted || capacityBooking.Status == BookingStatus.Active) &&
+                          bookingPickup.SequenceOrder < dropoffStop.SequenceOrder &&
+                          bookingDropoff.SequenceOrder > pickupStop.SequenceOrder
+                      select capacityBooking.Id)
+                    .CountAsync();
+
+                if (overlapping >= ride.MaxSeats)
+                    return await RollbackWithErrorAsync(ErrorCodes.StopSegmentFull);
+
+                var booking = new Booking
+                {
+                    Id = Guid.NewGuid(),
+                    RideId = ride.Id,
+                    PassengerId = passengerId,
+                    PickupStopId = pickupStop.Id,
+                    DropoffStopId = dropoffStop.Id,
+                    Status = BookingStatus.Pending,
+                    RequestedAt = DateTime.UtcNow
+                };
+
+                created = await _bookingRepository.CreateAsync(booking);
+                await transaction.CommitAsync();
+            }
+            catch (DbUpdateException exception) when (
+                exception.InnerException?.Message.Contains(
+                    "ix_bookings_active_passenger", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                await transaction.RollbackAsync();
+                return new ApiResponse<object> { Message = "You already have an active booking." };
+            }
+            catch
+            {
+                await transaction.RollbackAsync();
+                throw;
+            }
+        }
 
         var driverUserId = ride.Driver?.UserId
             ?? (await _userRepository.GetDriverProfileByIdAsync(ride.DriverId))?.UserId;
@@ -196,7 +245,7 @@ public class PassengerService : IPassengerService
             var pickupStop = booking.PickupStop
                 ?? await _rideRepository.GetStopByIdAsync(booking.PickupStopId);
 
-            if (pickupStop is not null && pickupStop.IsCompleted)
+            if (pickupStop is not null && pickupStop.Status == RideStopStatus.Completed)
                 return new ApiResponse<object>
                 {
                     Message = "Cannot cancel after the driver has arrived at your pickup stop."
@@ -216,6 +265,7 @@ public class PassengerService : IPassengerService
         booking.CancelReason = dto.Reason.Trim();
         booking.CancelClassification = classification;
         await _bookingRepository.UpdateAsync(booking);
+        await _notificationService.RemovePassengerFromRideGroupsAsync(booking.RideId, booking.PassengerId);
 
         if (classification == CancellationClassification.Frivolous)
         {
@@ -278,9 +328,16 @@ public class PassengerService : IPassengerService
         }
 
         int? etaSeconds = null;
-        if (driverLat.HasValue && driverLng.HasValue && pickupStop != null && !pickupStop.IsCompleted)
+        if (driverLat.HasValue && driverLng.HasValue && pickupStop != null &&
+            pickupStop.Status != RideStopStatus.Completed)
         {
             etaSeconds = CalculateEtaSeconds(driverLat.Value, driverLng.Value, pickupStop.Latitude, pickupStop.Longitude);
+        }
+
+        var driverPhotoUrl = driverProfile?.ProfilePhotoPath;
+        if (!string.IsNullOrEmpty(driverPhotoUrl) && driverProfile?.PhotoUpdatedAt.HasValue == true)
+        {
+            driverPhotoUrl = $"{driverPhotoUrl}?v={driverProfile.PhotoUpdatedAt.Value.Ticks}";
         }
 
         var response = new ActiveBookingResponseDto
@@ -288,6 +345,7 @@ public class PassengerService : IPassengerService
             Id = booking.Id,
             RideId = ride.Id,
             DriverName = driverUser?.FullName ?? "Unknown",
+            DriverPhotoUrl = driverPhotoUrl,
             CarMake = ride.Car?.Make ?? string.Empty,
             CarModel = ride.Car?.Model ?? string.Empty,
             PickupStopName = pickupStop?.Name ?? "Unknown",
@@ -305,11 +363,17 @@ public class PassengerService : IPassengerService
     }
 
     /// <summary>
-    /// Reports driver no-show after the passenger has waited. Deducts 10 trust points from the driver.
+    /// Submits a driver no-show claim for administrator review. Claims never trigger automatic penalties.
     /// </summary>
-    public async Task<ApiResponse<object>> MarkDriverNoShowAsync(Guid passengerId, Guid bookingId)
+    public async Task<ApiResponse<object>> MarkDriverNoShowAsync(
+        Guid passengerId,
+        Guid bookingId,
+        CancellationToken cancellationToken = default)
     {
-        var booking = await _bookingRepository.GetByIdAsync(bookingId, includeRide: true);
+        var booking = await _bookingRepository.GetByIdAsync(
+            bookingId,
+            includeRide: true,
+            cancellationToken: cancellationToken);
         if (booking is null || booking.PassengerId != passengerId)
             return new ApiResponse<object> { Message = ErrorCodes.NotFound };
 
@@ -319,41 +383,28 @@ public class PassengerService : IPassengerService
                 Message = "Booking must be Accepted or Active to report a driver no-show."
             };
 
-        var ride = booking.Ride ?? await _rideRepository.GetByIdAsync(booking.RideId);
+        var ride = booking.Ride ?? await _rideRepository.GetByIdAsync(booking.RideId, cancellationToken: cancellationToken);
         if (ride is null)
             return new ApiResponse<object> { Message = ErrorCodes.NotFound };
 
-        var driverProfile = await _userRepository.GetDriverProfileByIdAsync(ride.DriverId);
+        var pickupStop = await _rideRepository.GetStopByIdAsync(booking.PickupStopId, cancellationToken);
+        if (ride.StartedAt is not DateTime rideStartedAt ||
+            DateTime.UtcNow - rideStartedAt < TimeSpan.FromMinutes(AppConstants.NoShowGraceMinutes) ||
+            pickupStop is null || pickupStop.Status == RideStopStatus.Completed || pickupStop.ArrivedAt.HasValue)
+        {
+            return new ApiResponse<object> { Message = "The pickup is not eligible for a driver no-show claim." };
+        }
+
+        var driverProfile = await _userRepository.GetDriverProfileByIdAsync(ride.DriverId, cancellationToken);
         if (driverProfile is null)
             return new ApiResponse<object> { Message = "Driver profile not found." };
 
-        booking.Status = BookingStatus.Cancelled;
-        booking.CancelReason = "Driver no-show";
-        await _bookingRepository.UpdateAsync(booking);
-
-        await _userRepository.CreateNoShowLogAsync(new NoShowLog
+        return await _flagService.CreateFlagAsync(passengerId, new FlagDto
         {
-            Id = Guid.NewGuid(),
-            ReporterId = passengerId,
-            OffenderId = driverProfile.UserId,
+            ReporteeId = driverProfile.UserId,
             RideId = ride.Id,
-            CreatedAt = DateTime.UtcNow
-        });
-
-        await _trustService.DeductPointsAsync(driverProfile.UserId, AppConstants.NoShowPenalty);
-
-        var driverUser = await _userRepository.GetByIdAsync(driverProfile.UserId);
-        if (driverUser is not null)
-        {
-            await _notificationService.SendInAppNotificationAsync(
-                driverProfile.UserId,
-                NotificationType.NoShowRecorded,
-                "No-Show Recorded",
-                "A passenger reported you as a no-show for a recent ride.");
-            await _emailService.SendNoShowEmailAsync(driverUser.Email, driverUser.FullName);
-        }
-
-        return ApiResponse<object>.SuccessMessage("Driver no-show recorded.");
+            Reason = $"Driver no-show claim for booking {booking.Id} at pickup stop {pickupStop.Name}."
+        }, cancellationToken);
     }
 
     private static RideResponseDto MapRideToResponseDto(Ride ride, DriverLocation? driverLocation = null)
@@ -361,12 +412,19 @@ public class PassengerService : IPassengerService
         var driverName = ride.Driver?.User?.FullName ?? "Unknown";
         var driverRating = ride.Driver?.AverageRating ?? 0m;
 
+        var driverPhotoUrl = ride.Driver?.ProfilePhotoPath;
+        if (!string.IsNullOrEmpty(driverPhotoUrl) && ride.Driver?.PhotoUpdatedAt.HasValue == true)
+        {
+            driverPhotoUrl = $"{driverPhotoUrl}?v={ride.Driver.PhotoUpdatedAt.Value.Ticks}";
+        }
+
         return new RideResponseDto
         {
             Id = ride.Id,
             DriverId = ride.DriverId,
             DriverName = driverName,
             DriverRating = driverRating,
+            DriverPhotoUrl = driverPhotoUrl,
             CarMake = ride.Car?.Make ?? string.Empty,
             CarModel = ride.Car?.Model ?? string.Empty,
             Fare = ride.Fare,
@@ -382,9 +440,9 @@ public class PassengerService : IPassengerService
                     Lat = s.Latitude,
                     Lng = s.Longitude,
                     SequenceOrder = s.SequenceOrder,
-                    IsCompleted = s.IsCompleted,
+                    Status = s.Status.ToString(),
                     ArrivedAt = s.ArrivedAt,
-                    EtaSeconds = (!s.IsCompleted && driverLocation != null)
+                    EtaSeconds = (s.Status != RideStopStatus.Completed && driverLocation != null)
                         ? CalculateEtaSeconds(driverLocation.Latitude, driverLocation.Longitude, s.Latitude, s.Longitude)
                         : null
                 })

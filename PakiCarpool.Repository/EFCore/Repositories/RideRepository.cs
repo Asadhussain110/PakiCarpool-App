@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
+using PakiCarpool.Domain.DTOs.Passenger;
 using PakiCarpool.Domain.Enums;
 using PakiCarpool.Domain.Models;
 using PakiCarpool.Interfaces.IRepositories;
+using PakiCarpool.Repository.Dapper;
 using PakiCarpool.Repository.EFCore;
 
 namespace PakiCarpool.Repository.EFCore.Repositories;
@@ -13,14 +15,20 @@ namespace PakiCarpool.Repository.EFCore.Repositories;
 public class RideRepository : IRideRepository
 {
     private readonly PakiCarpoolDbContext _context;
+    private readonly RideSearchQuery _rideSearchQuery;
 
-    public RideRepository(PakiCarpoolDbContext context)
+    public RideRepository(PakiCarpoolDbContext context, RideSearchQuery rideSearchQuery)
     {
         _context = context;
+        _rideSearchQuery = rideSearchQuery;
     }
 
     /// <inheritdoc />
-    public async Task<Ride?> GetByIdAsync(Guid rideId, bool includeStops = false, bool includeBookings = false)
+    public async Task<Ride?> GetByIdAsync(
+        Guid rideId,
+        bool includeStops = false,
+        bool includeBookings = false,
+        CancellationToken cancellationToken = default)
     {
         IQueryable<Ride> query = _context.Rides;
 
@@ -34,7 +42,10 @@ public class RideRepository : IRideRepository
         query = query.Include(r => r.Driver).ThenInclude(dp => dp.User)
                      .Include(r => r.Car);
 
-        return await query.FirstOrDefaultAsync(r => r.Id == rideId);
+        if (includeStops || includeBookings)
+            query = query.AsSplitQuery();
+
+        return await query.FirstOrDefaultAsync(r => r.Id == rideId, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -45,8 +56,26 @@ public class RideRepository : IRideRepository
             .Include(r => r.Bookings)
             .Include(r => r.Car)
             .Include(r => r.Driver).ThenInclude(dp => dp.User)
+            .AsSplitQuery()
             .FirstOrDefaultAsync(r => r.DriverId == driverProfileId &&
                 (r.Status == RideStatus.Posted || r.Status == RideStatus.Active));
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> HasActiveRideForUserAsync(Guid userId)
+    {
+        return await _context.Rides
+            .AnyAsync(ride => ride.Driver.UserId == userId &&
+                (ride.Status == RideStatus.Posted || ride.Status == RideStatus.Active));
+    }
+
+    /// <inheritdoc />
+    public async Task<Ride?> GetMostRecentRideForUserAsync(Guid userId)
+    {
+        return await _context.Rides
+            .Where(ride => ride.Driver.UserId == userId)
+            .OrderByDescending(ride => ride.CreatedAt)
+            .FirstOrDefaultAsync();
     }
 
     /// <inheritdoc />
@@ -57,6 +86,7 @@ public class RideRepository : IRideRepository
             .Include(r => r.Stops.OrderBy(s => s.SequenceOrder))
             .Include(r => r.Driver).ThenInclude(dp => dp.User)
             .Include(r => r.Car)
+            .AsSplitQuery()
             .OrderByDescending(r => r.CreatedAt);
 
         var totalCount = await query.CountAsync();
@@ -69,6 +99,22 @@ public class RideRepository : IRideRepository
     }
 
     /// <inheritdoc />
+    public async Task<List<RideSearchCandidateDto>> GetCandidateRidesAsync(
+        double startLat,
+        double startLng,
+        double endLat,
+        double endLng,
+        double radiusMeters)
+    {
+        return await _rideSearchQuery.GetCandidateRidesAsync(
+            startLat,
+            startLng,
+            endLat,
+            endLng,
+            radiusMeters);
+    }
+
+    /// <inheritdoc />
     public async Task<(List<Ride> Items, int TotalCount)> GetAllPaginatedAsync(int page, int pageSize)
     {
         var totalCount = await _context.Rides.CountAsync();
@@ -76,6 +122,7 @@ public class RideRepository : IRideRepository
             .Include(r => r.Stops.OrderBy(s => s.SequenceOrder))
             .Include(r => r.Driver).ThenInclude(dp => dp.User)
             .Include(r => r.Car)
+            .AsSplitQuery()
             .OrderByDescending(r => r.CreatedAt)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
@@ -100,11 +147,11 @@ public class RideRepository : IRideRepository
     }
 
     /// <inheritdoc />
-    public async Task<RideStop?> GetStopByIdAsync(Guid stopId)
+    public async Task<RideStop?> GetStopByIdAsync(Guid stopId, CancellationToken cancellationToken = default)
     {
         return await _context.RideStops
             .Include(rs => rs.Ride)
-            .FirstOrDefaultAsync(rs => rs.Id == stopId);
+            .FirstOrDefaultAsync(rs => rs.Id == stopId, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -117,21 +164,22 @@ public class RideRepository : IRideRepository
     /// <inheritdoc />
     public async Task UpsertDriverLocationAsync(DriverLocation location)
     {
-        var existing = await _context.DriverLocations
-            .FirstOrDefaultAsync(dl => dl.DriverId == location.DriverId && dl.RideId == location.RideId);
+        const string sql = """
+            INSERT INTO "DriverLocations" ("Id", "DriverId", "RideId", "Latitude", "Longitude", "RecordedAt")
+            VALUES (@Id, @DriverId, @RideId, @Lat, @Lng, @RecordedAt)
+            ON CONFLICT ("DriverId", "RideId") DO UPDATE
+            SET "Latitude" = EXCLUDED."Latitude",
+                "Longitude" = EXCLUDED."Longitude",
+                "RecordedAt" = EXCLUDED."RecordedAt";
+            """;
 
-        if (existing != null)
-        {
-            existing.Latitude = location.Latitude;
-            existing.Longitude = location.Longitude;
-            existing.RecordedAt = DateTime.UtcNow;
-        }
-        else
-        {
-            _context.DriverLocations.Add(location);
-        }
-
-        await _context.SaveChangesAsync();
+        await _context.Database.ExecuteSqlRawAsync(sql,
+            new Npgsql.NpgsqlParameter("Id", Guid.NewGuid()),
+            new Npgsql.NpgsqlParameter("DriverId", location.DriverId),
+            new Npgsql.NpgsqlParameter("RideId", location.RideId),
+            new Npgsql.NpgsqlParameter("Lat", location.Latitude),
+            new Npgsql.NpgsqlParameter("Lng", location.Longitude),
+            new Npgsql.NpgsqlParameter("RecordedAt", location.RecordedAt));
     }
 
     /// <inheritdoc />

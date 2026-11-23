@@ -1,4 +1,5 @@
 ﻿using System.Net.Http.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using PakiCarpool.Interfaces.IServices;
 
@@ -11,16 +12,27 @@ namespace PakiCarpool.Services.Implementations;
 public sealed class HCaptchaService : IHCaptchaService
 {
     private const string SiteverifyUrl = "https://hcaptcha.com/siteverify";
+    private const string HCaptchaTestSecret = "0x0000000000000000000000000000000000000000";
 
     private readonly HttpClient _http;
     private readonly string _secretKey;
 
-    public HCaptchaService(HttpClient http, IConfiguration configuration)
+    public HCaptchaService(
+        HttpClient http,
+        IConfiguration configuration,
+        IWebHostEnvironment environment)
     {
         _http = http;
-        _secretKey = configuration["HCaptcha:SecretKey"]
-            ?? throw new InvalidOperationException(
-                "hCaptcha secret key is not configured. Set HCaptcha:SecretKey in appsettings.json or as an environment variable.");
+        var configuredSecret = configuration["HCaptcha:SecretKey"];
+        if (string.IsNullOrWhiteSpace(configuredSecret))
+            configuredSecret = Environment.GetEnvironmentVariable("HCAPTCHA_SECRET");
+        if (string.IsNullOrWhiteSpace(configuredSecret)
+            && string.Equals(environment.EnvironmentName, "Development", StringComparison.OrdinalIgnoreCase))
+            configuredSecret = HCaptchaTestSecret;
+        _secretKey = !string.IsNullOrWhiteSpace(configuredSecret)
+            ? configuredSecret
+            : throw new InvalidOperationException(
+                "hCaptcha secret key is not configured. Set HCaptcha:SecretKey or HCAPTCHA_SECRET.");
     }
 
     /// <inheritdoc />

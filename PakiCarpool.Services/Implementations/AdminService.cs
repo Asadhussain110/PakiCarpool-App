@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using PakiCarpool.Common.Constants;
 using PakiCarpool.Domain.DTOs.Admin;
 using PakiCarpool.Domain.DTOs.Common;
@@ -9,6 +10,7 @@ using PakiCarpool.Domain.Enums;
 using PakiCarpool.Domain.Models;
 using PakiCarpool.Interfaces.IRepositories;
 using PakiCarpool.Interfaces.IServices;
+using PakiCarpool.Repository.EFCore;
 
 namespace PakiCarpool.Services.Implementations;
 
@@ -20,26 +22,32 @@ namespace PakiCarpool.Services.Implementations;
 public class AdminService : IAdminService
 {
     private readonly IUserRepository _userRepository;
+    private readonly PakiCarpoolDbContext _context;
     private readonly IRideRepository _rideRepository;
     private readonly IBookingRepository _bookingRepository;
     private readonly IAdminRepository _adminRepository;
     private readonly INotificationService _notificationService;
     private readonly IEmailService _emailService;
+    private readonly IStorageService _storageService;
 
     public AdminService(
         IUserRepository userRepository,
+        PakiCarpoolDbContext context,
         IRideRepository rideRepository,
         IBookingRepository bookingRepository,
         IAdminRepository adminRepository,
         INotificationService notificationService,
-        IEmailService emailService)
+        IEmailService emailService,
+        IStorageService storageService)
     {
         _userRepository = userRepository;
+        _context = context;
         _rideRepository = rideRepository;
         _bookingRepository = bookingRepository;
         _adminRepository = adminRepository;
         _notificationService = notificationService;
         _emailService = emailService;
+        _storageService = storageService;
     }
 
     /// <summary>
@@ -184,18 +192,31 @@ public class AdminService : IAdminService
 
         foreach (var car in pendingCars)
         {
-            var profile = await _userRepository.GetDriverProfileByIdAsync(car.DriverId);
-            var driverName = "Unknown";
-            if (profile is not null)
-            {
-                var user = await _userRepository.GetByIdAsync(profile.UserId);
-                driverName = user?.FullName ?? "Unknown";
-            }
-
+            var driverName = car.Driver?.User?.FullName ?? "Unknown";
             result.Add(MapCarApproval(car, driverName));
         }
 
         return ApiResponse<List<CarApprovalDto>>.Success(result);
+    }
+
+    public async Task<ApiResponse<PaginatedResult<LivenessReviewDto>>> GetPendingLivenessReviewsAsync(
+        PaginationParams pagination,
+        CancellationToken cancellationToken = default)
+    {
+        var page = Math.Max(1, pagination.Page);
+        var pageSize = Math.Clamp(pagination.PageSize, 1, 50);
+        var (profiles, totalCount) = await _userRepository.GetPendingLivenessReviewsAsync(page, pageSize, cancellationToken);
+        var items = profiles.Select(profile => new LivenessReviewDto
+        {
+            DriverId = profile.UserId,
+            DriverName = profile.User?.FullName ?? "Unknown",
+            Email = profile.User?.Email ?? string.Empty,
+            SelfieUrl = profile.ProfilePhotoPath ?? string.Empty,
+            SubmittedAt = profile.PhotoUpdatedAt ?? profile.CreatedAt
+        }).ToList();
+
+        return ApiResponse<PaginatedResult<LivenessReviewDto>>.Success(
+            PaginatedResult<LivenessReviewDto>.Create(items, totalCount, page, pageSize));
     }
 
     /// <summary>
@@ -268,23 +289,36 @@ public class AdminService : IAdminService
         return ApiResponse<object>.SuccessMessage("Car rejected.");
     }
 
-    /// <summary>
-    /// Manually verifies a driver's liveness (admin override after failed checks).
-    /// </summary>
-    public async Task<ApiResponse<object>> ManualVerifyDriverAsync(Guid driverId)
+    public async Task<ApiResponse<object>> RejectLivenessSubmissionAsync(
+        Guid driverId,
+        RejectLivenessDto dto,
+        CancellationToken cancellationToken = default)
     {
-        var profile = await _userRepository.GetDriverProfileByIdAsync(driverId)
-                      ?? await _userRepository.GetDriverProfileByUserIdAsync(driverId);
-
+        var profile = await _userRepository.GetDriverProfileByUserIdAsync(driverId, cancellationToken);
         if (profile is null)
             return new ApiResponse<object> { Message = ErrorCodes.NotFound };
 
-        profile.LivenessVerified = true;
-        profile.LivenessFailCount = 0;
-        profile.LivenessBannedUntil = null;
-        await _userRepository.UpdateDriverProfileAsync(profile);
+        if (profile.LivenessVerified || string.IsNullOrWhiteSpace(profile.ProfilePhotoPath) || !profile.PhotoUpdatedAt.HasValue)
+            return new ApiResponse<object> { Message = "Only a pending liveness submission can be rejected." };
 
-        return ApiResponse<object>.SuccessMessage("Driver liveness manually verified.");
+        var selfieUrl = profile.ProfilePhotoPath;
+        profile.ProfilePhotoPath = null;
+        profile.PhotoUpdatedAt = null;
+        profile.LivenessVerified = false;
+        await _userRepository.UpdateDriverProfileAsync(profile, cancellationToken);
+        await _storageService.DeleteAsync(selfieUrl, cancellationToken);
+
+        if (profile.User is not null)
+        {
+            await _notificationService.SendInAppNotificationAsync(
+                profile.UserId,
+                NotificationType.LivenessFailure,
+                "Liveness Submission Rejected",
+                dto.Reason.Trim(),
+                cancellationToken);
+        }
+
+        return ApiResponse<object>.SuccessMessage("Liveness submission rejected.");
     }
 
     /// <summary>
@@ -324,7 +358,8 @@ public class AdminService : IAdminService
         {
             booking.Status = BookingStatus.Cancelled;
             booking.CancelReason = "Ride cancelled by administrator";
-            await _bookingRepository.UpdateAsync(booking);
+            _context.Entry(booking).State = EntityState.Modified;
+            await _notificationService.RemovePassengerFromRideGroupsAsync(booking.RideId, booking.PassengerId);
 
             await _notificationService.SendNotificationAsync(
                 booking.PassengerId,
@@ -332,7 +367,7 @@ public class AdminService : IAdminService
                 "Ride Cancelled",
                 "Your ride was cancelled by the platform administrator.");
 
-            var passenger = await _userRepository.GetByIdAsync(booking.PassengerId);
+            var passenger = booking.Passenger;
             if (passenger is not null)
             {
                 await _emailService.SendRideCancelledEmailAsync(
@@ -340,6 +375,7 @@ public class AdminService : IAdminService
                     $"Admin cancellation — ride {ride.Id}");
             }
         }
+        await _context.SaveChangesAsync();
 
         var driverProfile = await _userRepository.GetDriverProfileByIdAsync(ride.DriverId);
         if (driverProfile is not null)
@@ -359,28 +395,36 @@ public class AdminService : IAdminService
     /// </summary>
     public async Task<ApiResponse<PaginatedResult<FlagListItemDto>>> GetFlagsAsync(PaginationParams pagination)
     {
-        var (items, totalCount) = await _adminRepository.GetFlagsPaginatedAsync(
-            pagination.Page, pagination.PageSize);
-
-        var result = new List<FlagListItemDto>();
-        foreach (var flag in items)
-        {
-            var reporter = await _userRepository.GetByIdAsync(flag.ReporterId);
-            var reportee = await _userRepository.GetByIdAsync(flag.ReporteeId);
-
-            result.Add(new FlagListItemDto
+        var totalCount = await _context.Flags.CountAsync();
+        var items = await (
+            from flag in _context.Flags.AsNoTracking()
+            join reporter in _context.Users.AsNoTracking() on flag.ReporterId equals reporter.Id into reporters
+            from reporter in reporters.DefaultIfEmpty()
+            join reportee in _context.Users.AsNoTracking() on flag.ReporteeId equals reportee.Id into reportees
+            from reportee in reportees.DefaultIfEmpty()
+            orderby flag.CreatedAt descending
+            select new
             {
-                Id = flag.Id,
-                ReporterId = flag.ReporterId,
-                ReporterName = reporter?.FullName ?? "Unknown",
-                ReporteeId = flag.ReporteeId,
-                ReporteeName = reportee?.FullName ?? "Unknown",
-                RideId = flag.RideId,
-                Reason = flag.Reason,
-                Status = flag.Status,
-                CreatedAt = flag.CreatedAt
-            });
-        }
+                Flag = flag,
+                ReporterName = reporter == null ? null : reporter.FullName,
+                ReporteeName = reportee == null ? null : reportee.FullName
+            })
+            .Skip((pagination.Page - 1) * pagination.PageSize)
+            .Take(pagination.PageSize)
+            .ToListAsync();
+
+        var result = items.Select(flag => new FlagListItemDto
+        {
+            Id = flag.Flag.Id,
+            ReporterId = flag.Flag.ReporterId,
+            ReporterName = flag.ReporterName ?? "Unknown",
+            ReporteeId = flag.Flag.ReporteeId,
+            ReporteeName = flag.ReporteeName ?? "Unknown",
+            RideId = flag.Flag.RideId,
+            Reason = flag.Flag.Reason,
+            Status = flag.Flag.Status,
+            CreatedAt = flag.Flag.CreatedAt
+        }).ToList();
 
         return ApiResponse<PaginatedResult<FlagListItemDto>>.Success(
             PaginatedResult<FlagListItemDto>.Create(result, totalCount, pagination.Page, pagination.PageSize));
@@ -462,21 +506,30 @@ public class AdminService : IAdminService
         var toDate = to ?? DateTime.UtcNow;
 
         var dashboard = (await GetDashboardAsync()).Data;
-        var (rides, rideCount) = await _rideRepository.GetAllPaginatedAsync(1, 50);
+        var ridesInRangeQuery = _context.Rides
+            .AsNoTracking()
+            .Where(r => r.CreatedAt >= fromDate && r.CreatedAt <= toDate);
 
-        var ridesInRange = rides
-            .Where(r => r.CreatedAt >= fromDate && r.CreatedAt <= toDate)
-            .ToList();
+        var totalRidesInRange = await ridesInRangeQuery.CountAsync();
+        var completedInRange = await ridesInRangeQuery.CountAsync(r => r.Status == RideStatus.Completed);
+        var cancelledInRange = await ridesInRangeQuery.CountAsync(r => r.Status == RideStatus.Cancelled);
+        var ridesInRange = await ridesInRangeQuery
+            .Include(r => r.Stops.OrderBy(s => s.SequenceOrder))
+            .Include(r => r.Driver).ThenInclude(driver => driver.User)
+            .Include(r => r.Car)
+            .AsSplitQuery()
+            .OrderByDescending(r => r.CreatedAt)
+            .ToListAsync();
 
         var report = new
         {
             from = fromDate,
             to = toDate,
             summary = dashboard,
-            ridesInRange = ridesInRange.Count,
-            completedInRange = ridesInRange.Count(r => r.Status == RideStatus.Completed),
-            cancelledInRange = ridesInRange.Count(r => r.Status == RideStatus.Cancelled),
-            totalRidesSampled = rideCount,
+            ridesInRange = totalRidesInRange,
+            completedInRange,
+            cancelledInRange,
+            totalRidesSampled = totalRidesInRange,
             rides = ridesInRange.Select(MapRideToResponseDto).ToList()
         };
 
@@ -560,7 +613,7 @@ public class AdminService : IAdminService
                     Lat = s.Latitude,
                     Lng = s.Longitude,
                     SequenceOrder = s.SequenceOrder,
-                    IsCompleted = s.IsCompleted,
+                    Status = s.Status.ToString(),
                     ArrivedAt = s.ArrivedAt
                 })
                 .ToList()

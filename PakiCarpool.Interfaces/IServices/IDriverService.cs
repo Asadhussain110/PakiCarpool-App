@@ -44,7 +44,10 @@ public interface IDriverService
     /// <summary>
     /// Lists all bookings for a specific ride owned by this driver.
     /// </summary>
-    Task<ApiResponse<List<BookingDetailDto>>> GetRideBookingsAsync(Guid driverId, Guid rideId);
+    Task<ApiResponse<PaginatedResult<BookingDetailDto>>> GetRideBookingsAsync(
+        Guid driverId,
+        Guid rideId,
+        PaginationParams pagination);
 
     /// <summary>
     /// Accepts a pending booking request. Re-validates seat capacity for race condition safety.
@@ -60,7 +63,7 @@ public interface IDriverService
     /// Marks a passenger as no-show after 3-minute wait at pickup stop.
     /// Deducts 10 trust points from passenger.
     /// </summary>
-    Task<ApiResponse<object>> MarkPassengerNoShowAsync(Guid driverId, Guid bookingId);
+    Task<ApiResponse<object>> MarkPassengerNoShowAsync(Guid driverId, Guid bookingId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Ends the ride for a specific passenger. Sets booking to Completed.
@@ -71,6 +74,11 @@ public interface IDriverService
     /// Confirms cash payment received from passenger.
     /// </summary>
     Task<ApiResponse<object>> ConfirmCashReceivedAsync(Guid driverId, Guid bookingId);
+
+    /// <summary>
+    /// Marks the next stop as active when the driver begins travelling toward it.
+    /// </summary>
+    Task<ApiResponse<object>> BeginStopTravelAsync(Guid driverId, Guid stopId);
 
     /// <summary>
     /// Marks a stop as arrived. Notifies passengers at this pickup. Generates next navigation link.

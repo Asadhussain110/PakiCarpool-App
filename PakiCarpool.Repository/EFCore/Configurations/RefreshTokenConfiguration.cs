@@ -30,6 +30,9 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
         builder.Property(rt => rt.CreatedAt)
             .IsRequired();
 
+        builder.Property(rt => rt.SessionIssuedAt)
+            .IsRequired();
+
         builder.HasIndex(rt => rt.UserId);
         builder.HasIndex(rt => rt.Token);
         builder.HasIndex(rt => rt.ExpiresAt);

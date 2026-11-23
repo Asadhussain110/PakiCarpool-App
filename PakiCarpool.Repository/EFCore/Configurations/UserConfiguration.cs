@@ -50,6 +50,30 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
         builder.Property(u => u.FailedLoginCount)
             .HasDefaultValue(0);
 
+        builder.Property(u => u.LoginFailCount)
+            .IsRequired()
+            .HasDefaultValue(0);
+
+        builder.Property(u => u.AdminPasswordResetAttempts)
+            .IsRequired()
+            .HasDefaultValue(0);
+
+        builder.Property(u => u.PasswordResetAttempts)
+            .IsRequired()
+            .HasDefaultValue(0);
+
+        builder.Property(u => u.PasswordResetRequestCount)
+            .IsRequired()
+            .HasDefaultValue(0);
+
+        builder.Property(u => u.AdminPasswordResetRequestCount)
+            .IsRequired()
+            .HasDefaultValue(0);
+
+        builder.Property(u => u.AuthTokenVersion)
+            .IsRequired()
+            .HasDefaultValue(0);
+
         builder.Property(u => u.EmailOtp)
             .HasMaxLength(500);
 

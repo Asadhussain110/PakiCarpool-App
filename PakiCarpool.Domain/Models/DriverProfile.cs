@@ -12,6 +12,7 @@ public class DriverProfile
     public int LivenessFailCount { get; set; }
     public DateTime? LivenessBannedUntil { get; set; }
     public decimal AverageRating { get; set; }
+    public DateTime? PhotoUpdatedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public User User { get; set; } = null!;

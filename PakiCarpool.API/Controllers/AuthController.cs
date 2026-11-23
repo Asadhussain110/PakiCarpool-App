@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using PakiCarpool.API.Helpers;
 using PakiCarpool.Common.Constants;
 using PakiCarpool.Domain.DTOs.Auth;
@@ -15,12 +18,18 @@ namespace PakiCarpool.API.Controllers;
 [Route("api/v1/auth")]
 public sealed class AuthController : ApiControllerBase
 {
-    private const string RefreshTokenCookieName = "refreshToken";
     private readonly IAuthService _authService;
+    private readonly IConfiguration _configuration;
+    private readonly IWebHostEnvironment _env;
 
-    public AuthController(IAuthService authService)
+    public AuthController(
+        IAuthService authService,
+        IConfiguration configuration,
+        IWebHostEnvironment env)
     {
         _authService = authService;
+        _configuration = configuration;
+        _env = env;
     }
 
     /// <summary>POST /auth/register — Register passenger or driver.</summary>
@@ -40,6 +49,7 @@ public sealed class AuthController : ApiControllerBase
     [HttpPost("verify-email")]
     [AllowAnonymous]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiErrorResponse), StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> VerifyEmail([FromBody] VerifyEmailDto dto)
     {
         if (!ModelState.IsValid)
@@ -52,6 +62,7 @@ public sealed class AuthController : ApiControllerBase
     [HttpPost("login")]
     [AllowAnonymous]
     [ProducesResponseType(typeof(ApiResponse<AuthResponseDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiErrorResponse), StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Login([FromBody] LoginRequestDto dto)
     {
         if (!ModelState.IsValid)
@@ -70,7 +81,7 @@ public sealed class AuthController : ApiControllerBase
     [ProducesResponseType(typeof(ApiResponse<AuthResponseDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> Refresh()
     {
-        if (!Request.Cookies.TryGetValue(RefreshTokenCookieName, out var refreshToken)
+        if (!Request.Cookies.TryGetValue(RefreshTokenCookie.Name, out var refreshToken)
             || string.IsNullOrWhiteSpace(refreshToken))
         {
             return Unauthorized(ErrorResponse.Create(
@@ -92,7 +103,7 @@ public sealed class AuthController : ApiControllerBase
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
     public async Task<IActionResult> Logout()
     {
-        Request.Cookies.TryGetValue(RefreshTokenCookieName, out var refreshToken);
+        Request.Cookies.TryGetValue(RefreshTokenCookie.Name, out var refreshToken);
         var response = await _authService.LogoutAsync(GetUserId(), refreshToken ?? string.Empty);
         ClearRefreshTokenCookie();
         return FromResponse(response);
@@ -122,20 +133,48 @@ public sealed class AuthController : ApiControllerBase
         return FromResponse(await _authService.ResetPasswordAsync(dto));
     }
 
+    /// <summary>POST /auth/admin/forgot-password — Send a short-lived admin reset code.</summary>
+    [HttpPost("admin/forgot-password")]
+    [AllowAnonymous]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ForgotAdminPassword([FromBody] ForgotPasswordDto dto)
+    {
+        if (!ModelState.IsValid)
+            return InvalidModel();
+
+        return FromResponse(await _authService.ForgotAdminPasswordAsync(dto));
+    }
+
+    /// <summary>POST /auth/admin/reset-password — Reset an admin password with code and TOTP.</summary>
+    [HttpPost("admin/reset-password")]
+    [AllowAnonymous]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ResetAdminPassword([FromBody] AdminResetPasswordDto dto)
+    {
+        if (!ModelState.IsValid)
+            return InvalidModel();
+
+        return FromResponse(await _authService.ResetAdminPasswordAsync(dto));
+    }
+
     /// <summary>GET /auth/google — Start Google OAuth PKCE flow.</summary>
     [HttpGet("google")]
     [AllowAnonymous]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> GoogleAuth([FromQuery] string? role)
+    public async Task<IActionResult> GoogleAuth([FromQuery] string? role, CancellationToken cancellationToken)
     {
-        return FromResponse(await _authService.GetGoogleAuthUrlAsync(role));
+        return FromResponse(await _authService.GetGoogleAuthUrlAsync(role, cancellationToken));
     }
 
     /// <summary>GET /auth/google/callback — OAuth callback handler.</summary>
     [HttpGet("google/callback")]
     [AllowAnonymous]
     [ProducesResponseType(typeof(ApiResponse<AuthResponseDto>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> GoogleCallback([FromQuery] string code, [FromQuery] string state)
+    [ProducesResponseType(typeof(ApiErrorResponse), StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> GoogleCallback(
+        [FromQuery] string code,
+        [FromQuery] string state,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(state))
         {
@@ -145,7 +184,7 @@ public sealed class AuthController : ApiControllerBase
                 "OAuth code and state are required."));
         }
 
-        var response = await _authService.HandleGoogleCallbackAsync(code, state);
+        var response = await _authService.HandleGoogleCallbackAsync(code, state, cancellationToken);
         if (response.IsSuccess && response.Data?.RawRefreshToken is not null)
             SetRefreshTokenCookie(response.Data.RawRefreshToken);
 
@@ -156,6 +195,7 @@ public sealed class AuthController : ApiControllerBase
     [HttpPost("admin/login")]
     [AllowAnonymous]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiErrorResponse), StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> AdminLogin([FromBody] AdminLoginDto dto)
     {
         if (!ModelState.IsValid)
@@ -177,27 +217,14 @@ public sealed class AuthController : ApiControllerBase
     }
 
     private void SetRefreshTokenCookie(string rawRefreshToken)
-    {
-        Response.Cookies.Append(RefreshTokenCookieName, rawRefreshToken, new CookieOptions
-        {
-            HttpOnly = true,
-            Secure = Request.IsHttps,
-            SameSite = SameSiteMode.Strict,
-            Expires = DateTimeOffset.UtcNow.AddDays(AppConstants.RefreshTokenExpiryDays),
-            Path = "/api/v1/auth"
-        });
-    }
+        => RefreshTokenCookie.Append(
+            Response,
+            rawRefreshToken,
+            _configuration.GetValue<int>("Auth:RefreshTokenExpiryDays"),
+            !_env.IsDevelopment());
 
     private void ClearRefreshTokenCookie()
-    {
-        Response.Cookies.Delete(RefreshTokenCookieName, new CookieOptions
-        {
-            HttpOnly = true,
-            Secure = Request.IsHttps,
-            SameSite = SameSiteMode.Strict,
-            Path = "/api/v1/auth"
-        });
-    }
+        => RefreshTokenCookie.Delete(Response, !_env.IsDevelopment());
 
     private IActionResult InvalidModel()
     {

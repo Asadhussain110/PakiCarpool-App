@@ -4,7 +4,7 @@ using PakiCarpool.Interfaces.IServices;
 namespace PakiCarpool.API.Controllers;
 
 /// <summary>
-/// Email delivery is invoked internally by Auth/Admin/Driver flows through Brevo's REST API.
+/// Email delivery is invoked internally by Auth/Admin/Driver flows through the configured SMTP service.
 /// No public HTTP endpoints are defined in the FRD/API reference.
 /// </summary>
 [ApiController]

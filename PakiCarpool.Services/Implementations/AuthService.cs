@@ -2,8 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Google.Apis.Auth;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using PakiCarpool.Common.Constants;
 using PakiCarpool.Domain.DTOs.Auth;
 using PakiCarpool.Domain.DTOs.Common;
@@ -11,7 +11,6 @@ using PakiCarpool.Domain.Enums;
 using PakiCarpool.Domain.Models;
 using PakiCarpool.Interfaces.IRepositories;
 using PakiCarpool.Interfaces.IServices;
-using PakiCarpool.Repository.EFCore;
 using PakiCarpool.Security.Helpers;
 
 namespace PakiCarpool.Services.Implementations;
@@ -25,29 +24,50 @@ namespace PakiCarpool.Services.Implementations;
 public class AuthService : IAuthService
 {
     private readonly IUserRepository _userRepository;
+    private readonly IUserSessionService _userSessionService;
+    private readonly IRideRepository _rideRepository;
     private readonly IEmailService _emailService;
     private readonly JwtHelper _jwtHelper;
     private readonly AesEncryptionHelper _aesHelper;
+    private readonly IOAuthStateStore _oauthStateStore;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
     private readonly IHCaptchaService _hCaptchaService;
-    private readonly PakiCarpoolDbContext _dbContext;
+    private readonly ILogger<AuthService> _logger;
+
+    private const int AdminResetCodeExpiryMinutes = 10;
+    private const int AdminResetCodeAttemptLimit = 5;
+    private const int AdminResetCodeRequestLimit = 3;
+    private static readonly TimeSpan AdminResetCodeRequestWindow = TimeSpan.FromMinutes(15);
+    private const int PasswordResetCodeExpiryMinutes = 10;
+    private const int PasswordResetCodeAttemptLimit = 5;
+    private const int PasswordResetCodeRequestLimit = 3;
+    private static readonly TimeSpan PasswordResetCodeRequestWindow = TimeSpan.FromMinutes(15);
 
     public AuthService(
         IUserRepository userRepository,
+        IUserSessionService userSessionService,
+        IRideRepository rideRepository,
         IEmailService emailService,
         JwtHelper jwtHelper,
         AesEncryptionHelper aesHelper,
+        IOAuthStateStore oauthStateStore,
+        IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         IHCaptchaService hCaptchaService,
-        PakiCarpoolDbContext dbContext)
+        ILogger<AuthService> logger)
     {
         _userRepository = userRepository;
+        _userSessionService = userSessionService;
+        _rideRepository = rideRepository;
         _emailService = emailService;
         _jwtHelper = jwtHelper;
         _aesHelper = aesHelper;
+        _oauthStateStore = oauthStateStore;
+        _httpClientFactory = httpClientFactory;
         _configuration = configuration;
         _hCaptchaService = hCaptchaService;
-        _dbContext = dbContext;
+        _logger = logger;
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -70,75 +90,47 @@ public class AuthService : IAuthService
             };
         }
 
-        var strategy = _dbContext.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(async () =>
+        if (await _userRepository.EmailExistsAsync(dto.Email))
         {
-            await using var transaction = await _dbContext.Database.BeginTransactionAsync();
-            try
+            return new ApiResponse<object>
             {
-                if (await _userRepository.EmailExistsAsync(dto.Email))
-                {
-                    await transaction.RollbackAsync();
-                    return new ApiResponse<object>
-                    {
-                        Message = "An account with this email already exists."
-                    };
-                }
+                Message = "An account with this email already exists."
+            };
+        }
 
-                var otp = GenerateOtp();
-                var otpHash = HashOtp(otp);
+        var otp = GenerateOtp();
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            FullName = dto.FullName.Trim(),
+            Email = dto.Email.Trim().ToLowerInvariant(),
+            PasswordHash = BCryptHelper.HashPassword(dto.Password),
+            Role = dto.Role,
+            IsEmailVerified = false,
+            EmailOtp = HashOtp(otp),
+            EmailOtpExpiry = DateTime.UtcNow.AddMinutes(_configuration.GetValue<int>("Auth:EmailOtpExpiryMinutes")),
+            IsActive = true,
+            IsSuspended = false,
+            TrustScore = AppConstants.TrustScoreInitial,
+            FailedLoginCount = 0,
+            CreatedAt = DateTime.UtcNow
+        };
 
-                var user = new User
-                {
-                    Id = Guid.NewGuid(),
-                    FullName = dto.FullName.Trim(),
-                    Email = dto.Email.Trim().ToLowerInvariant(),
-                    PasswordHash = BCryptHelper.HashPassword(dto.Password),
-                    Role = dto.Role,
-                    IsEmailVerified = false,
-                    EmailOtp = otpHash,
-                    EmailOtpExpiry = DateTime.UtcNow.AddMinutes(AppConstants.OtpExpiryMinutes),
-                    IsActive = true,
-                    IsSuspended = false,
-                    TrustScore = AppConstants.TrustScoreInitial,
-                    FailedLoginCount = 0,
-                    CreatedAt = DateTime.UtcNow
-                };
-
-                var createdUser = await _userRepository.CreateAsync(user);
-
-                // Create DriverProfile for drivers
-                if (dto.Role == UserRole.Driver)
-                {
-                    var driverProfile = new DriverProfile
-                    {
-                        Id = Guid.NewGuid(),
-                        UserId = createdUser.Id,
-                        LivenessVerified = false,
-                        LivenessFailCount = 0,
-                        AverageRating = 0m
-                    };
-                    await _userRepository.CreateDriverProfileAsync(driverProfile);
-                }
-
-                await _emailService.SendEmailOtpAsync(createdUser.Email, createdUser.FullName, otp);
-                await transaction.CommitAsync();
-            }
-            catch
+        var driverProfile = dto.Role == UserRole.Driver
+            ? new DriverProfile
             {
-                try
-                {
-                    await transaction.RollbackAsync();
-                }
-                catch
-                {
-                }
-
-                throw;
+                Id = Guid.NewGuid(),
+                UserId = user.Id,
+                LivenessVerified = false,
+                LivenessFailCount = 0,
+                AverageRating = 0m
             }
+            : null;
 
-            return ApiResponse<object>.SuccessMessage("Check your email for the verification code.");
-        });
+        var createdUser = await _userRepository.CreateWithDriverProfileAsync(user, driverProfile);
+        await _emailService.SendEmailOtpAsync(createdUser.Email, createdUser.FullName, otp);
+
+        return ApiResponse<object>.SuccessMessage("Check your email for the verification code.");
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -147,12 +139,16 @@ public class AuthService : IAuthService
 
     /// <summary>
     /// Verifies the 6-digit OTP. Sets IsEmailVerified = true and clears OTP fields on success.
+    /// Driver accounts receive a liveness-pending partial token after verification.
     /// </summary>
     public async Task<ApiResponse<object>> VerifyEmailAsync(VerifyEmailDto dto)
     {
         var user = await _userRepository.GetByEmailAsync(dto.Email);
         if (user is null)
             return new ApiResponse<object> { Message = "Account not found." };
+
+        if (IsLoginBanned(user))
+            return CreateAccountLocked<object>(user.LoginBannedUntil!.Value);
 
         if (user.IsEmailVerified)
             return ApiResponse<object>.SuccessMessage("Email is already verified.");
@@ -167,10 +163,27 @@ public class AuthService : IAuthService
         if (!string.Equals(incomingHash, user.EmailOtp, StringComparison.Ordinal))
             return new ApiResponse<object> { Message = "Invalid verification code." };
 
+        await ResetLoginFailuresAsync(user);
         user.IsEmailVerified = true;
         user.EmailOtp = null;
         user.EmailOtpExpiry = null;
         await _userRepository.UpdateAsync(user);
+
+        if (user.Role == UserRole.Driver)
+        {
+            var partialToken = _jwtHelper.GeneratePartialToken(
+                user.Id, user.Email, user.Role.ToString(), JwtHelper.LivenessPendingClaim);
+
+            return ApiResponse<object>.Success(new AuthResponseDto
+            {
+                AccessToken = partialToken,
+                UserId = user.Id,
+                Email = user.Email,
+                FullName = user.FullName,
+                Role = user.Role,
+                LivenessPending = true
+            }, "Liveness verification required.");
+        }
 
         return ApiResponse<object>.SuccessMessage("Email verified successfully.");
     }
@@ -181,117 +194,57 @@ public class AuthService : IAuthService
 
     /// <summary>
     /// Authenticates with email/password. Handles lockout, captcha threshold, and liveness
-    /// pending for drivers. Returns JWT access token + refresh token via cookie.
+    /// pending for drivers. Returns a partial token for drivers and a token pair for passengers.
     /// </summary>
     public async Task<ApiResponse<AuthResponseDto>> LoginAsync(LoginRequestDto dto)
     {
         var user = await _userRepository.GetByEmailAsync(dto.Email);
         if (user is null)
-            return new ApiResponse<AuthResponseDto> { Message = "Invalid email or password." };
+            // No account row exists to lock; enumeration protection is preserved and the response stays generic.
+            return InvalidCredentials<AuthResponseDto>();
 
-        if (!user.IsEmailVerified)
-            return new ApiResponse<AuthResponseDto> { Message = "Please verify your email before logging in." };
-
-        if (!user.IsActive)
-            return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.AccountSuspended };
-
-        if (user.IsSuspended)
-            return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.AccountSuspended };
-
-        // Lockout check
-        if (user.LockoutUntil.HasValue && user.LockoutUntil > DateTime.UtcNow)
-        {
-            var remaining = (int)(user.LockoutUntil.Value - DateTime.UtcNow).TotalSeconds;
-            return new ApiResponse<AuthResponseDto>
-            {
-                Message = $"{ErrorCodes.AccountLocked}:{remaining}"
-            };
-        }
+        if (IsLoginBanned(user))
+            return CreateAccountLocked<AuthResponseDto>(user.LoginBannedUntil!.Value);
 
         // hCaptcha gate — enforced when the stored failure count already meets the threshold.
         // This fires BEFORE password validation so brute-forcers can't bypass it by always
         // sending a request; the gate applies even when the upcoming password check would succeed.
-        if (user.FailedLoginCount >= AppConstants.CaptchaRequiredAfterAttempts)
+        if (user.LoginFailCount >= AppConstants.CaptchaRequiredAfterAttempts)
         {
-            if (string.IsNullOrWhiteSpace(dto.HCaptchaToken))
-                return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.CaptchaRequired };
+            var captchaValid = false;
+            if (!string.IsNullOrWhiteSpace(dto.HCaptchaToken))
+            {
+                try
+                {
+                    captchaValid = await _hCaptchaService.VerifyAsync(dto.HCaptchaToken);
+                }
+                catch
+                {
+                }
+            }
 
-            var captchaValid = await _hCaptchaService.VerifyAsync(dto.HCaptchaToken);
             if (!captchaValid)
-                return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.CaptchaInvalid };
+            {
+                return await RecordCredentialFailureAsync<AuthResponseDto>(user);
+            }
         }
 
         // Password validation
         if (!BCryptHelper.VerifyPassword(dto.Password, user.PasswordHash ?? string.Empty))
-        {
-            user.FailedLoginCount++;
-
-            if (user.FailedLoginCount >= AppConstants.MaxLoginAttempts)
-            {
-                user.LockoutUntil = DateTime.UtcNow.AddMinutes(AppConstants.LockoutDurationMinutes);
-                user.FailedLoginCount = 0;
-                await _userRepository.UpdateAsync(user);
-                return new ApiResponse<AuthResponseDto>
-                {
-                    Message = $"{ErrorCodes.AccountLocked}:{AppConstants.LockoutDurationMinutes * 60}"
-                };
-            }
-
-            await _userRepository.UpdateAsync(user);
-
-            // Signal that hCaptcha is required after 3 failures
-            var requireCaptcha = user.FailedLoginCount >= AppConstants.CaptchaRequiredAfterAttempts;
-            return new ApiResponse<AuthResponseDto>
-            {
-                Message = requireCaptcha
-                    ? "Invalid password. Please complete the captcha challenge."
-                    : "Invalid email or password."
-            };
-        }
+            return await RecordCredentialFailureAsync<AuthResponseDto>(user);
 
         // Successful password check — reset counter
-        user.FailedLoginCount = 0;
-        user.LockoutUntil = null;
-        await _userRepository.UpdateAsync(user);
+        await ResetLoginFailuresAsync(user);
+
+        if (!user.IsEmailVerified || !user.IsActive || user.IsSuspended)
+            return InvalidCredentials<AuthResponseDto>();
 
         // Drivers must pass liveness before full access
         if (user.Role == UserRole.Driver)
-        {
-            var driverProfile = await _userRepository.GetDriverProfileByUserIdAsync(user.Id);
-            if (driverProfile != null)
-            {
-                // Check for liveness ban
-                if (driverProfile.LivenessBannedUntil.HasValue && driverProfile.LivenessBannedUntil > DateTime.UtcNow)
-                {
-                    return new ApiResponse<AuthResponseDto>
-                    {
-                        Message = $"{ErrorCodes.LivenessBanned}:{driverProfile.LivenessBannedUntil:O}"
-                    };
-                }
-            }
-
-            if (driverProfile is null || !driverProfile.LivenessVerified)
-            {
-                // Return a partial token with livenessPending claim
-                var partialToken = _jwtHelper.GeneratePartialToken(
-                    user.Id, user.Email, user.Role.ToString(), "livenessPending");
-
-                return ApiResponse<AuthResponseDto>.Success(new AuthResponseDto
-                {
-                    AccessToken = partialToken,
-                    UserId = user.Id,
-                    Email = user.Email,
-                    FullName = user.FullName,
-                    Role = user.Role,
-                    LivenessPending = true
-                }, "Liveness verification required.");
-            }
-
-            return await IssueTokenPairAsync(user, false);
-        }
+            return await IssueDriverLivenessPendingAsync(user);
 
         // Issue full token pair
-        return await IssueTokenPairAsync(user, false);
+        return await IssueTokenPairAsync(user);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -314,11 +267,30 @@ public class AuthService : IAuthService
         if (user is null || !user.IsActive || user.IsSuspended)
             return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.Unauthorized };
 
-        // Revoke old token
-        stored.IsRevoked = true;
-        await _userRepository.UpdateRefreshTokenAsync(stored);
+        if (user.Role == UserRole.Admin)
+            return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.Unauthorized };
 
-        return await IssueTokenPairAsync(user, false);
+        if (user.Role == UserRole.Driver)
+        {
+            var hasActiveRide = await _rideRepository.HasActiveRideForUserAsync(user.Id);
+
+            if (!hasActiveRide)
+            {
+                var mostRecentRide = await _rideRepository.GetMostRecentRideForUserAsync(user.Id);
+
+                if (mostRecentRide?.Status == RideStatus.Completed
+                    && mostRecentRide.CompletedAt.HasValue
+                    && mostRecentRide.CompletedAt.Value >= stored.SessionIssuedAt)
+                {
+                    return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.LivenessRequired };
+                }
+            }
+        }
+
+        if (!await _userRepository.TryConsumeRefreshTokenAsync(hashedToken, DateTime.UtcNow))
+            return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.TokenExpired };
+
+        return await IssueTokenPairAsync(user);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -347,58 +319,181 @@ public class AuthService : IAuthService
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Generates a secure password reset token and sends it by email.
+    /// Generates a short-lived password reset code and sends it by email.
     /// Always returns 200 to prevent email enumeration.
     /// </summary>
     public async Task<ApiResponse<object>> ForgotPasswordAsync(ForgotPasswordDto dto)
     {
+        const string responseMessage = "If this email is registered, password reset instructions have been sent.";
         var user = await _userRepository.GetByEmailAsync(dto.Email);
         if (user is null)
             // Deliberately vague — do not reveal if email is registered
-            return ApiResponse<object>.SuccessMessage("If this email is registered, a reset link has been sent.");
+            return ApiResponse<object>.SuccessMessage(responseMessage);
 
-        var resetToken = GenerateSecureToken();
-        var tokenHash = HashOtp(resetToken); // Reuse SHA-256 hash for reset tokens too
+        // Admins use the separate code-and-TOTP reset flow.
+        if (user.Role == UserRole.Admin)
+            return ApiResponse<object>.SuccessMessage(responseMessage);
 
-        user.EmailOtp = tokenHash; // Repurpose OTP field for reset token (short-lived)
-        user.EmailOtpExpiry = DateTime.UtcNow.AddMinutes(30);
-        await _userRepository.UpdateAsync(user);
+        var now = DateTime.UtcNow;
+        var code = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
+        var codeHash = HashAdminResetCode(code);
+        var issued = await _userRepository.TryIssuePasswordResetCodeAsync(
+            user.Id,
+            codeHash,
+            now,
+            now.AddMinutes(_configuration.GetValue(
+                "Auth:PasswordResetCodeExpiryMinutes",
+                PasswordResetCodeExpiryMinutes)),
+            PasswordResetCodeRequestWindow,
+            PasswordResetCodeRequestLimit);
+        if (issued)
+            await _emailService.SendPasswordResetEmailAsync(user.Email, user.FullName, code);
 
-        await _emailService.SendPasswordResetEmailAsync(user.Email, user.FullName, resetToken);
-
-        return ApiResponse<object>.SuccessMessage("If this email is registered, a reset link has been sent.");
+        return ApiResponse<object>.SuccessMessage(responseMessage);
     }
 
     /// <summary>
-    /// Resets the user's password using the emailed token.
+    /// Resets a passenger or driver's password using the emailed code.
     /// </summary>
     public async Task<ApiResponse<object>> ResetPasswordAsync(ResetPasswordDto dto)
     {
+        const string invalidMessage = "The reset code is invalid or expired. Request a new code and try again.";
         var user = await _userRepository.GetByEmailAsync(dto.Email);
-        if (user is null)
-            return new ApiResponse<object> { Message = "Invalid reset request." };
+        if (user is null || user.Role == UserRole.Admin || !user.IsActive ||
+            user.PasswordResetToken is null ||
+            user.PasswordResetTokenExpiry is null ||
+            user.PasswordResetTokenExpiry <= DateTime.UtcNow ||
+            user.PasswordResetAttempts >= PasswordResetCodeAttemptLimit)
+        {
+            return new ApiResponse<object> { Message = invalidMessage };
+        }
 
-        if (user.EmailOtp is null || user.EmailOtpExpiry is null)
-            return new ApiResponse<object> { Message = "Reset token is invalid or expired." };
+        var expectedHash = HashAdminResetCode(dto.Code);
+        if (!FixedTimeHashEquals(expectedHash, user.PasswordResetToken))
+        {
+            await _userRepository.IncrementPasswordResetAttemptsAsync(
+                user.Id, DateTime.UtcNow, PasswordResetCodeAttemptLimit);
+            return new ApiResponse<object> { Message = invalidMessage };
+        }
 
-        if (DateTime.UtcNow > user.EmailOtpExpiry)
-            return new ApiResponse<object> { Message = "Reset token has expired. Please request a new one." };
-
-        var expectedHash = HashOtp(dto.Token);
-        if (!string.Equals(expectedHash, user.EmailOtp, StringComparison.Ordinal))
-            return new ApiResponse<object> { Message = "Invalid reset token." };
-
-        user.PasswordHash = BCryptHelper.HashPassword(dto.NewPassword);
-        user.EmailOtp = null;
-        user.EmailOtpExpiry = null;
-        user.FailedLoginCount = 0;
-        user.LockoutUntil = null;
-        await _userRepository.UpdateAsync(user);
-
-        // Revoke all existing refresh tokens to force re-login everywhere
-        await _userRepository.RevokeAllRefreshTokensAsync(user.Id);
+        var completed = await _userRepository.CompletePasswordResetAsync(
+            user.Id,
+            expectedHash,
+            DateTime.UtcNow,
+            BCryptHelper.HashPassword(dto.NewPassword),
+            PasswordResetCodeAttemptLimit);
+        if (!completed)
+            return new ApiResponse<object> { Message = invalidMessage };
 
         return ApiResponse<object>.SuccessMessage("Password reset successfully. Please log in.");
+    }
+
+    public async Task<ApiResponse<object>> ForgotAdminPasswordAsync(ForgotPasswordDto dto)
+    {
+        const string responseMessage = "If this email is registered, a password reset code has been sent.";
+        var user = await _userRepository.GetByEmailAsync(dto.Email);
+        if (user is null || user.Role != UserRole.Admin || !user.IsActive)
+            return ApiResponse<object>.SuccessMessage(responseMessage);
+
+        var totpSecret = await _userRepository.GetTotpSecretAsync(user.Id);
+        if (totpSecret is null || !totpSecret.IsVerified)
+            return ApiResponse<object>.SuccessMessage(responseMessage);
+
+        var now = DateTime.UtcNow;
+        var code = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
+        var codeHash = HashAdminResetCode(code);
+        var issued = await _userRepository.TryIssueAdminPasswordResetCodeAsync(
+            user.Id,
+            codeHash,
+            now,
+            now.AddMinutes(AdminResetCodeExpiryMinutes),
+            AdminResetCodeRequestWindow,
+            AdminResetCodeRequestLimit);
+        if (!issued)
+            return ApiResponse<object>.SuccessMessage(responseMessage);
+
+        try
+        {
+            await _emailService.SendAdminPasswordResetCodeAsync(user.Email, user.FullName, code);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                "Admin password reset code email delivery failed for user {UserId} ({ExceptionType}).",
+                user.Id,
+                exception.GetType().Name);
+        }
+
+        return ApiResponse<object>.SuccessMessage(responseMessage);
+    }
+
+    public async Task<ApiResponse<object>> ResetAdminPasswordAsync(AdminResetPasswordDto dto)
+    {
+        const string invalidMessage = "The reset request is invalid or expired. Request a new code and try again.";
+        var user = await _userRepository.GetByEmailAsync(dto.Email);
+        if (user is null || user.Role != UserRole.Admin || !user.IsActive ||
+            user.AdminPasswordResetCodeHash is null ||
+            user.AdminPasswordResetCodeExpiry is null ||
+            user.AdminPasswordResetCodeExpiry <= DateTime.UtcNow ||
+            user.AdminPasswordResetAttempts >= AdminResetCodeAttemptLimit)
+        {
+            return new ApiResponse<object> { Message = invalidMessage };
+        }
+
+        var expectedHash = HashAdminResetCode(dto.Code);
+        if (!FixedTimeHashEquals(expectedHash, user.AdminPasswordResetCodeHash))
+        {
+            await _userRepository.IncrementAdminPasswordResetAttemptsAsync(
+                user.Id, DateTime.UtcNow, AdminResetCodeAttemptLimit);
+            return new ApiResponse<object> { Message = invalidMessage };
+        }
+
+        var totpSecret = await _userRepository.GetTotpSecretAsync(user.Id);
+        if (totpSecret is null || !totpSecret.IsVerified ||
+            !TotpHelper.VerifyCode(totpSecret.Secret, dto.TotpCode))
+        {
+            await _userRepository.IncrementAdminPasswordResetAttemptsAsync(
+                user.Id, DateTime.UtcNow, AdminResetCodeAttemptLimit);
+            return new ApiResponse<object> { Message = invalidMessage };
+        }
+
+        var now = DateTime.UtcNow;
+        var completed = await _userRepository.CompleteAdminPasswordResetAsync(
+            user.Id,
+            expectedHash,
+            now,
+            BCryptHelper.HashPassword(dto.NewPassword),
+            AdminResetCodeAttemptLimit);
+        if (!completed)
+            return new ApiResponse<object> { Message = invalidMessage };
+
+        return ApiResponse<object>.SuccessMessage("Password reset successfully. Sign in with your new password.");
+    }
+
+    private string HashAdminResetCode(string code)
+    {
+        var secret = _configuration["JWT_SECRET"]
+            ?? Environment.GetEnvironmentVariable("JWT_SECRET")
+            ?? _configuration["Jwt:Secret"];
+        if (string.IsNullOrWhiteSpace(secret))
+            throw new InvalidOperationException("JWT secret is not configured.");
+
+        var hash = HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(code));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static bool FixedTimeHashEquals(string left, string right)
+    {
+        try
+        {
+            return CryptographicOperations.FixedTimeEquals(
+                Convert.FromHexString(left),
+                Convert.FromHexString(right));
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -409,7 +504,7 @@ public class AuthService : IAuthService
     /// Returns the Google OAuth 2.0 authorization URL with PKCE code_challenge.
     /// Role is encoded in the state parameter for new user creation.
     /// </summary>
-    public async Task<ApiResponse<object>> GetGoogleAuthUrlAsync(string? role)
+    public async Task<ApiResponse<object>> GetGoogleAuthUrlAsync(string? role, CancellationToken cancellationToken = default)
     {
         var clientId = _configuration["GOOGLE_CLIENT_ID"]
             ?? throw new InvalidOperationException("GOOGLE_CLIENT_ID is not configured.");
@@ -418,8 +513,16 @@ public class AuthService : IAuthService
 
         var codeVerifier = GenerateSecureToken(32);
         var codeChallenge = ComputeCodeChallenge(codeVerifier);
-        var state = JsonSerializer.Serialize(new { role = role ?? "Passenger", codeVerifier });
-        var stateEncoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(state));
+        var state = GenerateSecureToken(32);
+        if (!await _oauthStateStore.TryCreateAsync(
+            state,
+            role ?? "Passenger",
+            codeVerifier,
+            TimeSpan.FromMinutes(10),
+            cancellationToken))
+        {
+            return ApiResponse<object>.Failure(ErrorCodes.InternalError, "Unable to start Google sign-in.");
+        }
 
         var authUrl = $"https://accounts.google.com/o/oauth2/v2/auth" +
                       $"?client_id={Uri.EscapeDataString(clientId)}" +
@@ -428,16 +531,18 @@ public class AuthService : IAuthService
                       $"&scope=openid%20email%20profile" +
                       $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
                       $"&code_challenge_method=S256" +
-                      $"&state={Uri.EscapeDataString(stateEncoded)}";
+                      $"&state={Uri.EscapeDataString(state)}";
 
-        await Task.CompletedTask;
-        return ApiResponse<object>.Success(new { authUrl, stateEncoded }, "Google OAuth URL generated.");
+        return ApiResponse<object>.Success(new { authUrl, state }, "Google OAuth URL generated.");
     }
 
     /// <summary>
     /// Handles the Google OAuth callback. Validates the ID token, creates or logs in the user.
     /// </summary>
-    public async Task<ApiResponse<AuthResponseDto>> HandleGoogleCallbackAsync(string code, string state)
+    public async Task<ApiResponse<AuthResponseDto>> HandleGoogleCallbackAsync(
+        string code,
+        string state,
+        CancellationToken cancellationToken = default)
     {
         var clientId = _configuration["GOOGLE_CLIENT_ID"]
             ?? throw new InvalidOperationException("GOOGLE_CLIENT_ID is not configured.");
@@ -446,27 +551,21 @@ public class AuthService : IAuthService
         var appDomain = _configuration["APP_DOMAIN"] ?? "app.pakicarpool.pk";
         var redirectUri = $"https://{appDomain}/auth/google/callback";
 
-        // Decode state to get role and codeVerifier
-        string roleStr = "Passenger";
-        string codeVerifier = string.Empty;
-        try
+        var storedState = await _oauthStateStore.ConsumeAsync(state, cancellationToken);
+        if (storedState is null)
         {
-            var stateJson = Encoding.UTF8.GetString(Convert.FromBase64String(state));
-            using var doc = JsonDocument.Parse(stateJson);
-            roleStr = doc.RootElement.GetProperty("role").GetString() ?? "Passenger";
-            codeVerifier = doc.RootElement.GetProperty("codeVerifier").GetString() ?? string.Empty;
+            return InvalidCredentials<AuthResponseDto>();
         }
-        catch
-        {
-            return new ApiResponse<AuthResponseDto> { Message = "Invalid OAuth state parameter." };
-        }
+
+        var roleStr = storedState.Role;
+        var codeVerifier = storedState.CodeVerifier;
 
         // Exchange code for tokens using Google OAuth endpoint
         string idToken;
         try
         {
-            using var httpClient = new HttpClient();
-            var tokenResponse = await httpClient.PostAsync("https://oauth2.googleapis.com/token",
+            var httpClient = _httpClientFactory.CreateClient("GoogleOAuth");
+            using var tokenResponse = await httpClient.PostAsync("https://oauth2.googleapis.com/token",
                 new FormUrlEncodedContent(new Dictionary<string, string>
                 {
                     ["code"] = code,
@@ -475,61 +574,72 @@ public class AuthService : IAuthService
                     ["redirect_uri"] = redirectUri,
                     ["grant_type"] = "authorization_code",
                     ["code_verifier"] = codeVerifier
-                }));
+                }), cancellationToken);
 
-            var tokenContent = await tokenResponse.Content.ReadAsStringAsync();
+            if (!tokenResponse.IsSuccessStatusCode)
+                return InvalidCredentials<AuthResponseDto>();
+
+            var tokenContent = await tokenResponse.Content.ReadAsStringAsync(cancellationToken);
             using var tokenDoc = JsonDocument.Parse(tokenContent);
             idToken = tokenDoc.RootElement.GetProperty("id_token").GetString()
                       ?? throw new InvalidOperationException("id_token missing from Google response.");
         }
-        catch (Exception ex)
+        catch
         {
-            return new ApiResponse<AuthResponseDto>
-            {
-                Message = $"Failed to exchange OAuth code: {ex.Message}"
-            };
+            if (cancellationToken.IsCancellationRequested)
+                throw;
+
+            return InvalidCredentials<AuthResponseDto>();
         }
 
         // Validate ID token using Google.Apis.Auth
         GoogleJsonWebSignature.Payload payload;
         try
         {
-            var validationSettings = new GoogleJsonWebSignature.ValidationSettings
-            {
-                Audience = new[] { clientId }
-            };
-            payload = await GoogleJsonWebSignature.ValidateAsync(idToken, validationSettings);
+            payload = await ValidateGoogleTokenAsync(idToken, clientId, cancellationToken);
         }
         catch
         {
-            return new ApiResponse<AuthResponseDto> { Message = "Google ID token validation failed." };
+            if (cancellationToken.IsCancellationRequested)
+                throw;
+
+            return InvalidCredentials<AuthResponseDto>();
         }
+
+        if (!payload.EmailVerified)
+            return new ApiResponse<AuthResponseDto> { Message = "Google account email is not verified." };
+
+        if (string.IsNullOrWhiteSpace(payload.Subject) || string.IsNullOrWhiteSpace(payload.Email))
+            return InvalidCredentials<AuthResponseDto>();
 
         var googleId = payload.Subject;
         var email = payload.Email.ToLowerInvariant();
         var fullName = payload.Name ?? payload.GivenName ?? "Google User";
 
         // Find existing user by GoogleId or Email
-        var existingUser = await _userRepository.GetByGoogleIdAsync(googleId)
-                           ?? await _userRepository.GetByEmailAsync(email);
+        var existingUser = await _userRepository.GetByGoogleIdAsync(googleId, cancellationToken)
+                   ?? await _userRepository.GetByEmailAsync(email, cancellationToken);
 
         if (existingUser is not null)
         {
+            if (IsLoginBanned(existingUser))
+                return CreateAccountLocked<AuthResponseDto>(existingUser.LoginBannedUntil!.Value);
+
             // Link GoogleId if missing
             if (string.IsNullOrEmpty(existingUser.GoogleId))
             {
                 existingUser.GoogleId = googleId;
-                await _userRepository.UpdateAsync(existingUser);
+                await _userRepository.UpdateAsync(existingUser, cancellationToken);
             }
 
             if (!existingUser.IsActive || existingUser.IsSuspended)
-                return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.AccountSuspended };
+                return InvalidCredentials<AuthResponseDto>();
 
             // Drivers must pass liveness at every login, including Google OAuth
             if (existingUser.Role == UserRole.Driver)
-                return await IssueDriverLivenessPendingAsync(existingUser);
+                return await IssueDriverLivenessPendingAsync(existingUser, cancellationToken);
 
-            return await IssueTokenPairAsync(existingUser, false);
+            return await IssueTokenPairAsync(existingUser, cancellationToken);
         }
 
         // Create new user
@@ -552,29 +662,44 @@ public class AuthService : IAuthService
             CreatedAt = DateTime.UtcNow
         };
 
-        var createdUser = await _userRepository.CreateAsync(newUser);
-
-        if (role == UserRole.Driver)
-        {
-            var driverProfile = new DriverProfile
+        var googleDriverProfile = role == UserRole.Driver
+            ? new DriverProfile
             {
                 Id = Guid.NewGuid(),
-                UserId = createdUser.Id,
+                UserId = newUser.Id,
                 LivenessVerified = false,
                 LivenessFailCount = 0,
                 AverageRating = 0m
-            };
-            await _userRepository.CreateDriverProfileAsync(driverProfile);
-            return await IssueDriverLivenessPendingAsync(createdUser);
-        }
+            }
+            : null;
+        var createdUser = await _userRepository.CreateWithDriverProfileAsync(
+            newUser, googleDriverProfile, cancellationToken);
 
-        return await IssueTokenPairAsync(createdUser, false);
+        if (role == UserRole.Driver)
+            return await IssueDriverLivenessPendingAsync(createdUser, cancellationToken);
+
+        return await IssueTokenPairAsync(createdUser, cancellationToken);
+    }
+
+    /// <summary>
+    /// Validates Google's signed identity token. Kept virtual so OAuth session tests can supply a verified payload.
+    /// </summary>
+    protected virtual async Task<GoogleJsonWebSignature.Payload> ValidateGoogleTokenAsync(
+        string idToken,
+        string clientId,
+        CancellationToken cancellationToken)
+    {
+        var validationSettings = new GoogleJsonWebSignature.ValidationSettings
+        {
+            Audience = new[] { clientId }
+        };
+        return await GoogleJsonWebSignature.ValidateAsync(idToken, validationSettings)
+            .WaitAsync(cancellationToken);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
     // ADMIN 2-STEP LOGIN
     // ──────────────────────────────────────────────────────────────────────────
-
     /// <summary>
     /// Admin login step 1: validates email/password, returns partial token with adminStep1 claim.
     /// Admins are seeded — no public registration.
@@ -583,33 +708,26 @@ public class AuthService : IAuthService
     {
         var user = await _userRepository.GetByEmailAsync(dto.Email);
 
-        if (user is null || user.Role != UserRole.Admin)
-            return new ApiResponse<object> { Message = "Invalid credentials." };
+        if (user is null)
+            return InvalidCredentials<object>();
 
-        if (!user.IsActive)
-            return new ApiResponse<object> { Message = ErrorCodes.AccountSuspended };
+        if (IsLoginBanned(user))
+            return CreateAccountLocked<object>(user.LoginBannedUntil!.Value);
 
-        if (user.LockoutUntil.HasValue && user.LockoutUntil > DateTime.UtcNow)
-            return new ApiResponse<object> { Message = ErrorCodes.AccountLocked };
+        if (user.Role != UserRole.Admin)
+            return await RecordCredentialFailureAsync<object>(user);
 
-        if (!BCryptHelper.VerifyPassword(dto.Password, user.PasswordHash ?? string.Empty))
-        {
-            user.FailedLoginCount++;
-            if (user.FailedLoginCount >= AppConstants.MaxLoginAttempts)
-            {
-                user.LockoutUntil = DateTime.UtcNow.AddMinutes(AppConstants.LockoutDurationMinutes);
-                user.FailedLoginCount = 0;
-            }
-            await _userRepository.UpdateAsync(user);
-            return new ApiResponse<object> { Message = "Invalid credentials." };
-        }
+        if (!BCryptHelper.VerifyPassword(dto.Password, user.PasswordHash ?? string.Empty) || !user.IsActive)
+            return await RecordCredentialFailureAsync<object>(user);
 
-        user.FailedLoginCount = 0;
-        user.LockoutUntil = null;
-        await _userRepository.UpdateAsync(user);
+        await ResetLoginFailuresAsync(user);
 
         var partialToken = _jwtHelper.GeneratePartialToken(
-            user.Id, user.Email, RoleNames.Admin, "adminStep1");
+            user.Id,
+            user.Email,
+            RoleNames.Admin,
+            "adminStep1",
+            authTokenVersion: user.AuthTokenVersion);
 
         return ApiResponse<object>.Success(
             new { partialToken },
@@ -634,6 +752,17 @@ public class AuthService : IAuthService
         if (!Guid.TryParse(userIdClaim, out var userId))
             return new ApiResponse<AuthResponseDto> { Message = "Invalid token claims." };
 
+        var tokenVersionValue = principal.FindFirst("authTokenVersion")?.Value ?? "0";
+        if (!int.TryParse(
+                tokenVersionValue,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var tokenVersion) ||
+            await _userRepository.GetAuthTokenVersionAsync(userId) != tokenVersion)
+        {
+            return new ApiResponse<AuthResponseDto> { Message = "Invalid or expired partial token." };
+        }
+
         var totpSecret = await _userRepository.GetTotpSecretAsync(userId);
         if (totpSecret is null || !totpSecret.IsVerified)
             return new ApiResponse<AuthResponseDto> { Message = "TOTP not configured for this admin account." };
@@ -646,7 +775,8 @@ public class AuthService : IAuthService
             return new ApiResponse<AuthResponseDto> { Message = "User not found." };
 
         // Admin token: 10 min, NO refresh token
-        var adminToken = _jwtHelper.GenerateAdminToken(user.Id, user.Email);
+        var authTokenVersion = await _userRepository.GetAuthTokenVersionAsync(user.Id) ?? 0;
+        var adminToken = _jwtHelper.GenerateAdminToken(user.Id, user.Email, authTokenVersion);
 
         return ApiResponse<AuthResponseDto>.Success(new AuthResponseDto
         {
@@ -666,9 +796,11 @@ public class AuthService : IAuthService
     /// <summary>
     /// Issues a short-lived partial JWT requiring liveness before full driver access.
     /// </summary>
-    private async Task<ApiResponse<AuthResponseDto>> IssueDriverLivenessPendingAsync(User user)
+    private async Task<ApiResponse<AuthResponseDto>> IssueDriverLivenessPendingAsync(
+        User user,
+        CancellationToken cancellationToken = default)
     {
-        var driverProfile = await _userRepository.GetDriverProfileByUserIdAsync(user.Id);
+        var driverProfile = await _userRepository.GetDriverProfileByUserIdAsync(user.Id, cancellationToken);
         if (driverProfile is not null &&
             driverProfile.LivenessBannedUntil.HasValue &&
             driverProfile.LivenessBannedUntil > DateTime.UtcNow)
@@ -679,8 +811,19 @@ public class AuthService : IAuthService
             };
         }
 
+        if (driverProfile?.LivenessVerified == true)
+        {
+            driverProfile.LivenessVerified = false;
+            driverProfile.PhotoUpdatedAt = null;
+            await _userRepository.UpdateDriverProfileAsync(driverProfile, cancellationToken);
+        }
+
         var partialToken = _jwtHelper.GeneratePartialToken(
-            user.Id, user.Email, user.Role.ToString(), "livenessPending");
+            user.Id,
+            user.Email,
+            user.Role.ToString(),
+            JwtHelper.LivenessPendingClaim,
+            _configuration.GetValue("Auth:LivenessPendingTokenExpiryMinutes", 24 * 60));
 
         return ApiResponse<AuthResponseDto>.Success(new AuthResponseDto
         {
@@ -693,39 +836,68 @@ public class AuthService : IAuthService
         }, "Liveness verification required.");
     }
 
-    private async Task<ApiResponse<AuthResponseDto>> IssueTokenPairAsync(User user, bool livenessPending)
+    private bool IsLoginBanned(User user)
     {
-        var accessToken = _jwtHelper.GenerateAccessToken(user.Id, user.Email, user.Role.ToString());
+        return user.LoginBannedUntil.HasValue && user.LoginBannedUntil.Value > DateTime.UtcNow;
+    }
 
-        // Create refresh token
-        var rawRefreshToken = GenerateSecureToken(64);
-        var hashedRefreshToken = HashRefreshToken(rawRefreshToken);
+    private async Task ResetLoginFailuresAsync(User user)
+    {
+        await _userRepository.ResetLoginFailAsync(user.Id);
+        user.LoginFailCount = 0;
+        user.LoginBannedUntil = null;
+    }
 
-        var refreshTokenEntity = new RefreshToken
-        {
-            Id = Guid.NewGuid(),
-            UserId = user.Id,
-            Token = hashedRefreshToken,
-            ExpiresAt = DateTime.UtcNow.AddDays(AppConstants.RefreshTokenExpiryDays),
-            IsRevoked = false,
-            CreatedAt = DateTime.UtcNow
-        };
+    private async Task<ApiResponse<T>> RecordLoginFailureAsync<T>(User user)
+    {
+        await _userRepository.IncrementLoginFailAsync(user.Id);
+        var failCount = await _userRepository.GetLoginFailCountAsync(user.Id);
+        if (!failCount.HasValue)
+            return InvalidCredentials<T>();
 
-        await _userRepository.CreateRefreshTokenAsync(refreshTokenEntity);
+        user.LoginFailCount = failCount.Value;
+        var threshold = _configuration.GetValue<int>("Auth:LoginLockoutThreshold");
+        if (failCount.Value < threshold)
+            return InvalidCredentials<T>();
 
-        // The raw token is included in the response data so the controller can set the httpOnly cookie.
-        return ApiResponse<AuthResponseDto>.Success(
-            new AuthResponseDto
-            {
-                AccessToken = accessToken,
-                UserId = user.Id,
-                Email = user.Email,
-                FullName = user.FullName,
-                Role = user.Role,
-                LivenessPending = livenessPending,
-                RawRefreshToken = rawRefreshToken
-            },
-            "Login successful.");
+        var lockoutMinutes = _configuration.GetValue<int>("Auth:LoginLockoutMinutes");
+        var bannedUntil = DateTime.UtcNow.AddMinutes(lockoutMinutes);
+        await _userRepository.SetLoginBanAsync(user.Id, bannedUntil);
+        user.LoginFailCount = 0;
+        user.LoginBannedUntil = bannedUntil;
+        return CreateAccountLocked<T>(bannedUntil);
+    }
+
+    private async Task<ApiResponse<T>> RecordCredentialFailureAsync<T>(User? user)
+    {
+        if (user is null)
+            return InvalidCredentials<T>();
+
+        return await RecordLoginFailureAsync<T>(user);
+    }
+
+    private static ApiResponse<T> InvalidCredentials<T>()
+    {
+        return ApiResponse<T>.Failure(ErrorCodes.Unauthorized, "Invalid credentials.");
+    }
+
+    private static ApiResponse<T> CreateAccountLocked<T>(DateTime bannedUntil)
+    {
+        return ApiResponse<T>.Failure(
+            ErrorCodes.AccountLocked,
+            "Too many failed login attempts. Try again later.",
+            bannedUntil);
+    }
+
+    private async Task<ApiResponse<AuthResponseDto>> IssueTokenPairAsync(
+        User user,
+        CancellationToken cancellationToken = default)
+    {
+        if (user.Role == UserRole.Admin)
+            return new ApiResponse<AuthResponseDto> { Message = ErrorCodes.Unauthorized };
+
+        var session = await _userSessionService.IssueAsync(user, cancellationToken);
+        return ApiResponse<AuthResponseDto>.Success(session, "Login successful.");
     }
 
     private static string GenerateOtp()

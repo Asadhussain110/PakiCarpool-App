@@ -6,4 +6,5 @@
   <Project Path="PakiCarpool.Repository\PakiCarpool.Repository.csproj" />
   <Project Path="PakiCarpool.Services\PakiCarpool.Services.csproj" />
   <Project Path="PakiCarpool.API\PakiCarpool.API.csproj" />
+  <Project Path="PakiCarpool.API.Tests\PakiCarpool.API.Tests.csproj" />
 </Solution>

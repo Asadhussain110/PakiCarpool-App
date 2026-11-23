@@ -26,7 +26,7 @@ public interface IAdminRepository
     /// <summary>
     /// Creates a new flag.
     /// </summary>
-    Task<Flag> CreateFlagAsync(Flag flag);
+    Task<Flag> CreateFlagAsync(Flag flag, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Updates an existing flag.

@@ -13,6 +13,7 @@
   <ItemGroup>
     <ProjectReference Include="..\PakiCarpool.Domain\PakiCarpool.Domain.csproj" />
     <ProjectReference Include="..\PakiCarpool.Common\PakiCarpool.Common.csproj" />
+    <ProjectReference Include="..\PakiCarpool.Interfaces\PakiCarpool.Interfaces.csproj" />
   </ItemGroup>
 
   <ItemGroup>

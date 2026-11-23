@@ -21,11 +21,63 @@ public class CancelBookingDto
     public string Reason { get; set; } = string.Empty;
 }
 
+public class RideSearchRequestDto
+{
+    public double StartLatitude { get; set; }
+    public double StartLongitude { get; set; }
+    public double EndLatitude { get; set; }
+    public double EndLongitude { get; set; }
+    public double RadiusMeters { get; set; } = 500;
+}
+
+public class RideSearchResultDto
+{
+    public Guid RideId { get; set; }
+    public Guid DriverId { get; set; }
+    public string DriverName { get; set; } = string.Empty;
+    public string DriverPhotoUrl { get; set; } = string.Empty;
+    public RideStopMatchDto StartStop { get; set; } = new();
+    public RideStopMatchDto EndStop { get; set; } = new();
+    public int MatchRank { get; set; }
+    public DateTime DeparturTime { get; set; }
+    public int AvailableSeats { get; set; }
+}
+
+public class RideStopMatchDto
+{
+    public Guid StopId { get; set; }
+    public string StopName { get; set; } = string.Empty;
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    public bool IsPerfectMatch { get; set; }
+    public double? DistanceMeters { get; set; }
+}
+
+public class RideSearchCandidateDto
+{
+    public Guid RideId { get; set; }
+    public Guid DriverId { get; set; }
+    public string DriverName { get; set; } = string.Empty;
+    public string? DriverPhotoPath { get; set; }
+    public DateTime? DriverPhotoUpdatedAt { get; set; }
+    public DateTime DepartureTime { get; set; }
+    public int MaxSeats { get; set; }
+    public int AvailableSeats { get; set; }
+    public Guid StopId { get; set; }
+    public string StopName { get; set; } = string.Empty;
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    public int SequenceOrder { get; set; }
+    public double StartDistanceMeters { get; set; }
+    public double EndDistanceMeters { get; set; }
+}
+
 public class ActiveBookingResponseDto
 {
     public Guid Id { get; set; }
     public Guid RideId { get; set; }
     public string DriverName { get; set; } = string.Empty;
+    public string? DriverPhotoUrl { get; set; }
     public string CarMake { get; set; } = string.Empty;
     public string CarModel { get; set; } = string.Empty;
     public string PickupStopName { get; set; } = string.Empty;

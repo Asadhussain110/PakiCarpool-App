@@ -25,6 +25,9 @@
   <ItemGroup>
     <!-- Google OAuth token validation -->
     <PackageReference Include="Google.Apis.Auth" Version="1.68.0" />
+    <PackageReference Include="MailKit" Version="4.18.1" />
+    <PackageReference Include="StackExchange.Redis" Version="2.8.58" />
+    <PackageReference Include="Supabase" Version="8.1.1" />
   </ItemGroup>
 
 </Project>

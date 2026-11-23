@@ -40,6 +40,10 @@ public interface IAdminService
     /// </summary>
     Task<ApiResponse<List<CarApprovalDto>>> GetPendingCarApprovalsAsync();
 
+    Task<ApiResponse<PaginatedResult<LivenessReviewDto>>> GetPendingLivenessReviewsAsync(
+        PaginationParams pagination,
+        CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Approves a car registration. Sets status to Approved with timestamp.
     /// </summary>
@@ -50,10 +54,10 @@ public interface IAdminService
     /// </summary>
     Task<ApiResponse<object>> RejectCarAsync(Guid carId, RejectCarDto dto);
 
-    /// <summary>
-    /// Manually verifies a driver's liveness (admin override).
-    /// </summary>
-    Task<ApiResponse<object>> ManualVerifyDriverAsync(Guid driverId);
+    Task<ApiResponse<object>> RejectLivenessSubmissionAsync(
+        Guid driverId,
+        RejectLivenessDto dto,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Lists all rides with pagination.

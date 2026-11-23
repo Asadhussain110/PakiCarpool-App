@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using PakiCarpool.Domain.Enums;
 using PakiCarpool.Domain.Models;
 
 namespace PakiCarpool.Repository.EFCore.Configurations;
@@ -25,8 +26,11 @@ public class RideStopConfiguration : IEntityTypeConfiguration<RideStop>
         builder.Property(rs => rs.SequenceOrder)
             .IsRequired();
 
-        builder.Property(rs => rs.IsCompleted)
-            .HasDefaultValue(false);
+        builder.Property(rs => rs.Status)
+            .HasConversion<string>()
+            .HasMaxLength(16)
+            .IsRequired()
+            .HasDefaultValue(RideStopStatus.Upcoming);
 
         builder.HasIndex(rs => new { rs.RideId, rs.SequenceOrder });
 

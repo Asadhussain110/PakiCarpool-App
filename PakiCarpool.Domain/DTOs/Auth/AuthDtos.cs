@@ -58,11 +58,31 @@ public class ResetPasswordDto
     public string Email { get; set; } = string.Empty;
 
     [Required]
-    public string Token { get; set; } = string.Empty;
+    [RegularExpression(@"^\d{6}$")]
+    public string Code { get; set; } = string.Empty;
 
     [Required]
     [StringLength(128, MinimumLength = 8)]
     public string NewPassword { get; set; } = string.Empty;
+}
+
+public class AdminResetPasswordDto
+{
+    [Required]
+    [EmailAddress]
+    public string Email { get; set; } = string.Empty;
+
+    [Required]
+    [RegularExpression(@"^\d{6}$")]
+    public string Code { get; set; } = string.Empty;
+
+    [Required]
+    [StringLength(128, MinimumLength = 8)]
+    public string NewPassword { get; set; } = string.Empty;
+
+    [Required]
+    [RegularExpression(@"^\d{6}$")]
+    public string TotpCode { get; set; } = string.Empty;
 }
 
 public class AdminLoginDto
@@ -93,6 +113,7 @@ public class AuthResponseDto
     public string FullName { get; set; } = string.Empty;
     public UserRole Role { get; set; }
     public bool LivenessPending { get; set; }
+    public DateTime? SessionIssuedAt { get; set; }
 
     /// <summary>
     /// Raw refresh token — used internally by the controller to set the httpOnly cookie.

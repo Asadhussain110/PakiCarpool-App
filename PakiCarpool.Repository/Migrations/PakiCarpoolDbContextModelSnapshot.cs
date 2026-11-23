@@ -283,6 +283,9 @@ namespace PakiCarpool.Repository.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(false);
 
+                    b.Property<DateTime?>("PhotoUpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("ProfilePhotoPath")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
@@ -331,6 +334,50 @@ namespace PakiCarpool.Repository.Migrations
                     b.HasIndex("Status");
 
                     b.ToTable("Flags", (string)null);
+                });
+
+            modelBuilder.Entity("PakiCarpool.Domain.Models.LivenessChallenge", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("DriverId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsUsed")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
+                    b.Property<DateTime>("IssuedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Nonce")
+                        .IsRequired()
+                        .HasMaxLength(88)
+                        .HasColumnType("character varying(88)");
+
+                    b.Property<string>("PromptsJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)")
+                        .HasDefaultValue("[]");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DriverId");
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.HasIndex("Nonce")
+                        .IsUnique();
+
+                    b.ToTable("LivenessChallenges", (string)null);
                 });
 
             modelBuilder.Entity("PakiCarpool.Domain.Models.NoShowLog", b =>
@@ -407,6 +454,9 @@ namespace PakiCarpool.Repository.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
                         .HasDefaultValue(false);
+
+                    b.Property<DateTime>("SessionIssuedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Token")
                         .IsRequired()
@@ -485,11 +535,6 @@ namespace PakiCarpool.Repository.Migrations
                     b.Property<DateTime?>("ArrivedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<bool>("IsCompleted")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false);
-
                     b.Property<double>("Latitude")
                         .HasColumnType("double precision");
 
@@ -506,6 +551,13 @@ namespace PakiCarpool.Repository.Migrations
 
                     b.Property<int>("SequenceOrder")
                         .HasColumnType("integer");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("Upcoming");
 
                     b.HasKey("Id");
 
@@ -548,6 +600,30 @@ namespace PakiCarpool.Repository.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
+
+                    b.Property<int>("AdminPasswordResetAttempts")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<DateTime?>("AdminPasswordResetCodeExpiry")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("AdminPasswordResetCodeHash")
+                        .HasColumnType("text");
+
+                    b.Property<int>("AdminPasswordResetRequestCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<DateTime?>("AdminPasswordResetRequestWindowStart")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("AuthTokenVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -594,9 +670,36 @@ namespace PakiCarpool.Repository.Migrations
                     b.Property<DateTime?>("LockoutUntil")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<DateTime?>("LoginBannedUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("LoginFailCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
                     b.Property<string>("PasswordHash")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<int>("PasswordResetAttempts")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<int>("PasswordResetRequestCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<DateTime?>("PasswordResetRequestWindowStart")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PasswordResetToken")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("PasswordResetTokenExpiry")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Role")
                         .IsRequired()
@@ -686,6 +789,17 @@ namespace PakiCarpool.Repository.Migrations
                         .IsRequired();
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("PakiCarpool.Domain.Models.LivenessChallenge", b =>
+                {
+                    b.HasOne("PakiCarpool.Domain.Models.User", "Driver")
+                        .WithMany()
+                        .HasForeignKey("DriverId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Driver");
                 });
 
             modelBuilder.Entity("PakiCarpool.Domain.Models.RefreshToken", b =>

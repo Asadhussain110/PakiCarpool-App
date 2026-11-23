@@ -12,6 +12,12 @@ public class ApiResponse<T>
     public T? Data { get; set; }
     public string Message { get; set; } = string.Empty;
 
+    [JsonIgnore]
+    public string? ErrorCode { get; set; }
+
+    [JsonIgnore]
+    public DateTime? BannedUntil { get; set; }
+
     /// <summary>
     /// Indicates whether the operation succeeded. Not included in the JSON response body.
     /// </summary>
@@ -26,6 +32,16 @@ public class ApiResponse<T>
     public static ApiResponse<T> SuccessMessage(string message)
     {
         return new ApiResponse<T> { Message = message, IsSuccess = true };
+    }
+
+    public static ApiResponse<T> Failure(string errorCode, string message, DateTime? bannedUntil = null)
+    {
+        return new ApiResponse<T>
+        {
+            ErrorCode = errorCode,
+            Message = message,
+            BannedUntil = bannedUntil
+        };
     }
 }
 
@@ -47,6 +63,15 @@ public class ErrorResponse
             Message = message
         };
     }
+}
+
+/// <summary>
+/// Standard API error response with optional account lockout expiry.
+/// </summary>
+public sealed class ApiErrorResponse : ErrorResponse
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTime? BannedUntil { get; set; }
 }
 
 public class RatingDto

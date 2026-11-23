@@ -30,15 +30,12 @@ public static class AppConstants
     public const int BookingTimeoutMinutes = 2;
     public const int MinCancelReasonLength = 10;
     public const int NoShowWaitMinutes = 3;
+    public const int NoShowGraceMinutes = 3;
 
     // Authentication
-    public const int AccessTokenExpiryMinutes = 15;
-    public const int RefreshTokenExpiryDays = 7;
-    public const int AdminTokenExpiryMinutes = 60;
     public const int MaxLoginAttempts = 5;
     public const int CaptchaRequiredAfterAttempts = 3;
     public const int LockoutDurationMinutes = 15;
-    public const int OtpExpiryMinutes = 10;
     public const int OtpLength = 6;
     public const int BcryptWorkFactor = 12;
 

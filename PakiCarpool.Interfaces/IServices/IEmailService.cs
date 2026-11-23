@@ -1,7 +1,7 @@
 namespace PakiCarpool.Interfaces.IServices;
 
 /// <summary>
-/// Defines outbound email operations via the Brevo transactional email REST API.
+/// Defines outbound email operations via the configured SMTP server.
 /// All email sending is async and non-blocking.
 /// </summary>
 public interface IEmailService
@@ -15,6 +15,11 @@ public interface IEmailService
     /// Sends a password reset email with a secure token link.
     /// </summary>
     Task SendPasswordResetEmailAsync(string toEmail, string fullName, string resetToken);
+
+    /// <summary>
+    /// Sends the short-lived password reset code for an admin account.
+    /// </summary>
+    Task SendAdminPasswordResetCodeAsync(string toEmail, string fullName, string code);
 
     /// <summary>
     /// Sends a car approval notification email to the driver.

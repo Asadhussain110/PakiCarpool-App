@@ -34,22 +34,28 @@ public class FlagService : IFlagService
     /// Creates a flag/report against another user for a specific ride.
     /// Reporter and reportee must both be participants in the referenced ride.
     /// </summary>
-    public async Task<ApiResponse<object>> CreateFlagAsync(Guid reporterId, FlagDto dto)
+    public async Task<ApiResponse<object>> CreateFlagAsync(
+        Guid reporterId,
+        FlagDto dto,
+        CancellationToken cancellationToken = default)
     {
         if (reporterId == dto.ReporteeId)
             return new ApiResponse<object> { Message = "You cannot flag yourself." };
 
-        var reporter = await _userRepository.GetByIdAsync(reporterId);
-        var reportee = await _userRepository.GetByIdAsync(dto.ReporteeId);
+        var reporter = await _userRepository.GetByIdAsync(reporterId, cancellationToken);
+        var reportee = await _userRepository.GetByIdAsync(dto.ReporteeId, cancellationToken);
         if (reporter is null || reportee is null)
             return new ApiResponse<object> { Message = ErrorCodes.NotFound };
 
-        var ride = await _rideRepository.GetByIdAsync(dto.RideId, includeBookings: true);
+        var ride = await _rideRepository.GetByIdAsync(
+            dto.RideId,
+            includeBookings: true,
+            cancellationToken: cancellationToken);
         if (ride is null)
             return new ApiResponse<object> { Message = ErrorCodes.NotFound };
 
-        var reporterIsParticipant = await IsRideParticipantAsync(ride, reporterId);
-        var reporteeIsParticipant = await IsRideParticipantAsync(ride, dto.ReporteeId);
+        var reporterIsParticipant = await IsRideParticipantAsync(ride, reporterId, cancellationToken);
+        var reporteeIsParticipant = await IsRideParticipantAsync(ride, dto.ReporteeId, cancellationToken);
 
         if (!reporterIsParticipant || !reporteeIsParticipant)
             return new ApiResponse<object>
@@ -74,23 +80,23 @@ public class FlagService : IFlagService
             CreatedAt = DateTime.UtcNow
         };
 
-        await _adminRepository.CreateFlagAsync(flag);
+        await _adminRepository.CreateFlagAsync(flag, cancellationToken);
 
         return ApiResponse<object>.Success(
             new { flagId = flag.Id },
             "Flag submitted. An admin will review it shortly.");
     }
 
-    private async Task<bool> IsRideParticipantAsync(Ride ride, Guid userId)
+    private async Task<bool> IsRideParticipantAsync(Ride ride, Guid userId, CancellationToken cancellationToken)
     {
         var driverProfile = ride.Driver
-            ?? await _userRepository.GetDriverProfileByIdAsync(ride.DriverId);
+            ?? await _userRepository.GetDriverProfileByIdAsync(ride.DriverId, cancellationToken);
 
         if (driverProfile is not null && driverProfile.UserId == userId)
             return true;
 
         var bookings = ride.Bookings?.ToList()
-            ?? await _bookingRepository.GetBookingsByRideIdAsync(ride.Id);
+            ?? await _bookingRepository.GetBookingsByRideIdAsync(ride.Id, cancellationToken);
 
         return bookings.Any(b => b.PassengerId == userId);
     }

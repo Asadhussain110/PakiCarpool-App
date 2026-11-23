@@ -11,7 +11,7 @@ public interface IBookingRepository
     /// <summary>
     /// Gets a booking by ID, optionally including related entities.
     /// </summary>
-    Task<Booking?> GetByIdAsync(Guid bookingId, bool includeRide = false, bool includeStops = false);
+    Task<Booking?> GetByIdAsync(Guid bookingId, bool includeRide = false, bool includeStops = false, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets the active booking for a passenger (Pending, Accepted, or Active status).
@@ -21,7 +21,12 @@ public interface IBookingRepository
     /// <summary>
     /// Gets all bookings for a ride.
     /// </summary>
-    Task<List<Booking>> GetBookingsByRideIdAsync(Guid rideId);
+    Task<List<Booking>> GetBookingsByRideIdAsync(Guid rideId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets a paginated page of bookings for a ride.
+    /// </summary>
+    Task<(List<Booking> Items, int TotalCount)> GetBookingsByRideIdAsync(Guid rideId, int page, int pageSize);
 
     /// <summary>
     /// Gets all timed-out pending bookings (RequestedAt older than timeout threshold).

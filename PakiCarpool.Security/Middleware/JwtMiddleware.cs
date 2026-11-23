@@ -4,6 +4,8 @@ using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
+using PakiCarpool.Interfaces.IServices;
+using PakiCarpool.Security.Helpers;
 
 namespace PakiCarpool.Security.Middleware;
 
@@ -18,19 +20,24 @@ public class JwtMiddleware
     private readonly string _secret;
     private readonly string _issuer;
     private readonly string _audience;
+    private readonly ITokenRevocationService _tokenRevocationService;
 
-    public JwtMiddleware(RequestDelegate next, IConfiguration configuration)
+    public JwtMiddleware(RequestDelegate next, IConfiguration configuration, ITokenRevocationService tokenRevocationService)
     {
         _next = next;
         _secret = configuration["JWT_SECRET"]
             ?? configuration["Jwt:Secret"]
+            ?? Environment.GetEnvironmentVariable("JWT_SECRET")
             ?? throw new InvalidOperationException("JWT secret is not configured.");
         _issuer = configuration["JWT_ISSUER"]
             ?? configuration["Jwt:Issuer"]
+            ?? Environment.GetEnvironmentVariable("JWT_ISSUER")
             ?? "api.pakicarpool.pk";
         _audience = configuration["JWT_AUDIENCE"]
             ?? configuration["Jwt:Audience"]
+            ?? Environment.GetEnvironmentVariable("JWT_AUDIENCE")
             ?? "pakicarpool-clients";
+        _tokenRevocationService = tokenRevocationService;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -40,13 +47,13 @@ public class JwtMiddleware
         if (authHeader != null && authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
         {
             var token = authHeader["Bearer ".Length..].Trim();
-            AttachUserToContext(context, token);
+            await AttachUserToContextAsync(context, token);
         }
 
         await _next(context);
     }
 
-    private void AttachUserToContext(HttpContext context, string token)
+    private async Task AttachUserToContextAsync(HttpContext context, string token)
     {
         try
         {
@@ -62,21 +69,28 @@ public class JwtMiddleware
                 ValidateIssuerSigningKey = true,
                 IssuerSigningKey = key,
                 ValidateLifetime = true,
-                ClockSkew = TimeSpan.FromMinutes(5)
+                ClockSkew = JwtHelper.ValidationClockSkew
             };
 
             var principal = tokenHandler.ValidateToken(token, validationParameters, out var validatedToken);
 
-            if (validatedToken is JwtSecurityToken jwtToken &&
-                jwtToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase))
+            if (validatedToken is not JwtSecurityToken jwtToken ||
+                !jwtToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase))
             {
-                context.User = principal;
+                return;
             }
+
+            var jti = principal.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;
+            if (!string.IsNullOrWhiteSpace(jti) && await _tokenRevocationService.IsRevokedAsync(jti))
+            {
+                return;
+            }
+
+            context.User = principal;
         }
         catch
         {
             // Token validation failed — context.User remains unauthenticated.
-            // Authorization attributes will return 401 as needed.
         }
     }
 }

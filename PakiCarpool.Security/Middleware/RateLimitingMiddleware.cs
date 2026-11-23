@@ -1,113 +1,140 @@
-using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using PakiCarpool.Common.Constants;
 
 namespace PakiCarpool.Security.Middleware;
 
 /// <summary>
-/// Rate limiting middleware implementing per-IP request throttling.
-/// General endpoints: 100 requests/minute. Auth endpoints: 10 requests/minute.
-/// Uses a sliding window approach with concurrent dictionary for thread safety.
+/// Applies shared fixed-window limits by client IP and request category.
 /// </summary>
 public class RateLimitingMiddleware
 {
     private readonly RequestDelegate _next;
+    private readonly IRateLimitCounter _counter;
+    private readonly ILogger<RateLimitingMiddleware> _logger;
+    private readonly IConfiguration _configuration;
     private readonly int _generalLimit;
     private readonly int _authLimit;
-    private static readonly ConcurrentDictionary<string, SlidingWindowCounter> Counters = new();
 
-    public RateLimitingMiddleware(RequestDelegate next, IConfiguration configuration)
+    public RateLimitingMiddleware(
+        RequestDelegate next,
+        IConfiguration configuration,
+        IRateLimitCounter counter,
+        ILogger<RateLimitingMiddleware> logger)
     {
         _next = next;
-        _generalLimit = configuration.GetValue("RateLimit:GeneralPerMinute", AppConstants.RateLimitGeneralPerMinute);
-        _authLimit = configuration.GetValue("RateLimit:AuthPerMinute", AppConstants.RateLimitAuthPerMinute);
+        _configuration = configuration;
+        _counter = counter;
+        _logger = logger;
+        _generalLimit = Math.Clamp(
+            configuration.GetValue("RateLimit:GeneralPerMinute", AppConstants.RateLimitGeneralPerMinute),
+            1,
+            AppConstants.RateLimitGeneralPerMinute);
+        _authLimit = Math.Clamp(
+            configuration.GetValue("RateLimit:AuthPerMinute", AppConstants.RateLimitAuthPerMinute),
+            1,
+            AppConstants.RateLimitAuthPerMinute);
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
-        var ipAddress = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        var path = context.Request.Path.Value?.ToLowerInvariant() ?? string.Empty;
-        var isAuthEndpoint = path.Contains("/auth/");
-
-        var limit = isAuthEndpoint ? _authLimit : _generalLimit;
-        var key = $"{ipAddress}:{(isAuthEndpoint ? "auth" : "general")}";
-
-        var counter = Counters.GetOrAdd(key, _ => new SlidingWindowCounter());
-        counter.CleanupExpired();
-
-        if (counter.Count >= limit)
+        var category = GetCategory(context.Request);
+        var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString() ?? "unknown";
+        RateLimitCounterResult counterResult;
+        try
         {
-            context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            counterResult = await _counter.IncrementAsync(
+                $"rate-limit:ip:{ipAddress}:{category.Name}",
+                category.Window,
+                context.RequestAborted);
+        }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Rate-limit counter failed for category {Category}.", category.Name);
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             context.Response.ContentType = "application/json";
-
-            var retryAfter = counter.GetRetryAfterSeconds();
-            context.Response.Headers.RetryAfter = retryAfter.ToString();
-
-            var response = new
+            await context.Response.WriteAsJsonAsync(new
             {
-                statusCode = 429,
-                error = ErrorCodes.RateLimitExceeded,
-                message = $"Rate limit exceeded. Try again in {retryAfter} seconds."
-            };
-
-            await context.Response.WriteAsJsonAsync(response);
+                statusCode = StatusCodes.Status503ServiceUnavailable,
+                error = "RATE_LIMITER_UNAVAILABLE",
+                message = "Request protection is temporarily unavailable."
+            }, context.RequestAborted);
             return;
         }
 
-        counter.Increment();
+        if (counterResult.Count > category.Limit)
+        {
+            context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            context.Response.ContentType = "application/json";
+            context.Response.Headers.RetryAfter = counterResult.RetryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            await context.Response.WriteAsJsonAsync(new
+            {
+                statusCode = StatusCodes.Status429TooManyRequests,
+                error = ErrorCodes.RateLimitExceeded,
+                message = "Rate limit exceeded. Try again later."
+            }, context.RequestAborted);
+            return;
+        }
+
         await _next(context);
     }
 
-    /// <summary>
-    /// Sliding window counter tracking request timestamps within a 1-minute window.
-    /// Thread-safe via lock-based synchronization.
-    /// </summary>
-    private class SlidingWindowCounter
+    private (string Name, int Limit, TimeSpan Window) GetCategory(HttpRequest request)
     {
-        private readonly object _lock = new();
-        private readonly Queue<DateTime> _timestamps = new();
-
-        public int Count
+        if (request.Path.StartsWithSegments("/api/v1/auth/admin/forgot-password"))
         {
-            get
-            {
-                lock (_lock)
-                {
-                    return _timestamps.Count;
-                }
-            }
+            return (
+                "admin-password-reset-request",
+                Math.Max(1, _configuration.GetValue("RateLimit:AdminPasswordResetRequestLimit", 3)),
+                TimeSpan.FromMinutes(15));
         }
 
-        public void Increment()
+        if (request.Path.StartsWithSegments("/api/v1/auth/admin/reset-password"))
         {
-            lock (_lock)
-            {
-                _timestamps.Enqueue(DateTime.UtcNow);
-            }
+            return (
+                "admin-password-reset-complete",
+                Math.Max(1, _configuration.GetValue("RateLimit:AdminPasswordResetCompleteLimit", 8)),
+                TimeSpan.FromMinutes(15));
         }
 
-        public void CleanupExpired()
+        if (request.Path.StartsWithSegments("/api/v1/auth"))
+            return ("auth", _authLimit, TimeSpan.FromMinutes(1));
+
+        var livenessPath = request.Path.StartsWithSegments("/api/v1/driver/liveness");
+        if (livenessPath)
         {
-            lock (_lock)
-            {
-                var cutoff = DateTime.UtcNow.AddMinutes(-1);
-                while (_timestamps.Count > 0 && _timestamps.Peek() < cutoff)
-                {
-                    _timestamps.Dequeue();
-                }
-            }
+            var limit = Math.Max(1, _configuration.GetValue("RateLimit:Liveness:Limit", 5));
+            var period = ParsePeriod(_configuration["RateLimit:Liveness:Period"]);
+            return ("liveness", limit, period);
         }
 
-        public int GetRetryAfterSeconds()
+        if (request.Path.StartsWithSegments("/api/v1/driver/location"))
         {
-            lock (_lock)
-            {
-                if (_timestamps.Count == 0) return 0;
-                var oldest = _timestamps.Peek();
-                var retryAfter = oldest.AddMinutes(1) - DateTime.UtcNow;
-                return Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
-            }
+            var limit = Math.Max(1, _configuration.GetValue("RateLimit:Location:PerMinute", 30));
+            return ("location", limit, TimeSpan.FromMinutes(1));
         }
+
+        return ("general", _generalLimit, TimeSpan.FromMinutes(1));
+    }
+
+    private static TimeSpan ParsePeriod(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return TimeSpan.FromHours(1);
+
+        var normalized = value.Trim().ToLowerInvariant();
+        if (normalized.EndsWith('h') && double.TryParse(normalized[..^1], out var hours))
+            return TimeSpan.FromHours(Math.Clamp(hours, 1, 24));
+        if (normalized.EndsWith('m') && double.TryParse(normalized[..^1], out var minutes))
+            return TimeSpan.FromMinutes(Math.Clamp(minutes, 1, 1440));
+        if (TimeSpan.TryParse(value, out var parsed) && parsed > TimeSpan.Zero)
+            return parsed;
+
+        return TimeSpan.FromHours(1);
     }
 }

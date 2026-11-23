@@ -45,10 +45,10 @@ public class AdminRepository : IAdminRepository
     }
 
     /// <inheritdoc />
-    public async Task<Flag> CreateFlagAsync(Flag flag)
+    public async Task<Flag> CreateFlagAsync(Flag flag, CancellationToken cancellationToken = default)
     {
         _context.Flags.Add(flag);
-        await _context.SaveChangesAsync();
+        await _context.SaveChangesAsync(cancellationToken);
         return flag;
     }
 

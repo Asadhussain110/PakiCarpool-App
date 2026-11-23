@@ -12,7 +12,9 @@ namespace PakiCarpool.Repository.EFCore;
 /// </summary>
 public class PakiCarpoolDbContext : DbContext
 {
-    private readonly string? _encryptionKey;
+    private readonly Dictionary<byte, string> _encryptionKeys = new();
+    private readonly string? _legacyCbcKey;
+    private readonly byte _activeEncryptionVersion;
 
     public PakiCarpoolDbContext(DbContextOptions<PakiCarpoolDbContext> options)
         : base(options)
@@ -22,7 +24,27 @@ public class PakiCarpoolDbContext : DbContext
     public PakiCarpoolDbContext(DbContextOptions<PakiCarpoolDbContext> options, IConfiguration configuration)
         : base(options)
     {
-        _encryptionKey = configuration["AES_ENCRYPTION_KEY"];
+        var legacyKey = configuration["AES_ENCRYPTION_KEY"];
+        if (string.IsNullOrWhiteSpace(legacyKey))
+            legacyKey = null;
+        var versionOneKey = legacyKey ?? configuration["AES_KEY_V1"];
+        var versionTwoKey = configuration["AES_KEY_V2"];
+        if (string.IsNullOrWhiteSpace(versionTwoKey))
+            versionTwoKey = null;
+
+        if (!string.IsNullOrWhiteSpace(legacyKey))
+            _encryptionKeys[0] = legacyKey;
+        if (!string.IsNullOrWhiteSpace(versionOneKey))
+            _encryptionKeys[1] = versionOneKey;
+        if (!string.IsNullOrWhiteSpace(versionTwoKey))
+            _encryptionKeys[2] = versionTwoKey;
+
+        if (_encryptionKeys.Count > 0)
+        {
+            _activeEncryptionVersion = _encryptionKeys.Keys.Max();
+            _legacyCbcKey = new[] { legacyKey, versionOneKey, versionTwoKey }
+                .First(value => !string.IsNullOrWhiteSpace(value));
+        }
     }
 
     public DbSet<User> Users => Set<User>();
@@ -39,6 +61,7 @@ public class PakiCarpoolDbContext : DbContext
     public DbSet<CancellationLog> CancellationLogs => Set<CancellationLog>();
     public DbSet<NoShowLog> NoShowLogs => Set<NoShowLog>();
     public DbSet<Flag> Flags => Set<Flag>();
+    public DbSet<LivenessChallenge> LivenessChallenges => Set<LivenessChallenge>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -46,9 +69,12 @@ public class PakiCarpoolDbContext : DbContext
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(PakiCarpoolDbContext).Assembly);
 
         // Apply AES-256 encryption value converters for sensitive fields
-        if (!string.IsNullOrEmpty(_encryptionKey))
+        if (_encryptionKeys.Count > 0 && _legacyCbcKey is not null)
         {
-            var converter = new EncryptedStringConverter(_encryptionKey);
+            var converter = new EncryptedStringConverter(
+                _encryptionKeys,
+                _activeEncryptionVersion,
+                _legacyCbcKey);
 
             modelBuilder.Entity<DriverCar>()
                 .Property(e => e.LicensePlate)

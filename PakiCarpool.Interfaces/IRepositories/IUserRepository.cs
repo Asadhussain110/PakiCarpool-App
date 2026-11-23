@@ -11,17 +11,17 @@ public interface IUserRepository
     /// <summary>
     /// Gets a user by their primary key.
     /// </summary>
-    Task<User?> GetByIdAsync(Guid id);
+    Task<User?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets a user by email (case-insensitive).
     /// </summary>
-    Task<User?> GetByEmailAsync(string email);
+    Task<User?> GetByEmailAsync(string email, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets a user by their Google ID.
     /// </summary>
-    Task<User?> GetByGoogleIdAsync(string googleId);
+    Task<User?> GetByGoogleIdAsync(string googleId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Checks if an email is already registered.
@@ -34,9 +34,82 @@ public interface IUserRepository
     Task<User> CreateAsync(User user);
 
     /// <summary>
+    /// Creates a user and optional driver profile in one transaction.
+    /// </summary>
+    Task<User> CreateWithDriverProfileAsync(User user, DriverProfile? driverProfile, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically increments the user's login failure count.
+    /// </summary>
+    Task IncrementLoginFailAsync(Guid userId);
+
+    /// <summary>
+    /// Resets the user's login failure count and clears its login ban.
+    /// </summary>
+    Task ResetLoginFailAsync(Guid userId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets the persisted login failure count without relying on tracked entity state.
+    /// </summary>
+    Task<int?> GetLoginFailCountAsync(Guid userId);
+
+    /// <summary>
+    /// Sets a login ban and resets the failure count atomically.
+    /// </summary>
+    Task SetLoginBanAsync(Guid userId, DateTime bannedUntil);
+
+    /// <summary>
     /// Updates an existing user record.
     /// </summary>
-    Task UpdateAsync(User user);
+    Task UpdateAsync(User user, CancellationToken cancellationToken = default);
+
+    Task<int?> GetAuthTokenVersionAsync(Guid userId, CancellationToken cancellationToken = default);
+
+    Task<bool> TryIssuePasswordResetCodeAsync(
+        Guid userId,
+        string codeHash,
+        DateTime now,
+        DateTime expiresAt,
+        TimeSpan requestWindow,
+        int requestLimit,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> IncrementPasswordResetAttemptsAsync(
+        Guid userId,
+        DateTime now,
+        int attemptLimit,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> CompletePasswordResetAsync(
+        Guid userId,
+        string codeHash,
+        DateTime now,
+        string passwordHash,
+        int attemptLimit,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> TryIssueAdminPasswordResetCodeAsync(
+        Guid userId,
+        string codeHash,
+        DateTime now,
+        DateTime expiresAt,
+        TimeSpan requestWindow,
+        int requestLimit,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> IncrementAdminPasswordResetAttemptsAsync(
+        Guid userId,
+        DateTime now,
+        int attemptLimit,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> CompleteAdminPasswordResetAsync(
+        Guid userId,
+        string codeHash,
+        DateTime now,
+        string passwordHash,
+        int attemptLimit,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets all users with pagination.
@@ -56,12 +129,17 @@ public interface IUserRepository
     /// <summary>
     /// Gets the driver profile for a user, including cars.
     /// </summary>
-    Task<DriverProfile?> GetDriverProfileByUserIdAsync(Guid userId);
+    Task<DriverProfile?> GetDriverProfileByUserIdAsync(Guid userId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets a driver profile by its primary key.
     /// </summary>
-    Task<DriverProfile?> GetDriverProfileByIdAsync(Guid driverProfileId);
+    Task<DriverProfile?> GetDriverProfileByIdAsync(Guid driverProfileId, CancellationToken cancellationToken = default);
+
+    Task<(List<DriverProfile> Items, int TotalCount)> GetPendingLivenessReviewsAsync(
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Creates a new driver profile.
@@ -71,7 +149,7 @@ public interface IUserRepository
     /// <summary>
     /// Updates an existing driver profile.
     /// </summary>
-    Task UpdateDriverProfileAsync(DriverProfile profile);
+    Task UpdateDriverProfileAsync(DriverProfile profile, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets a driver car by ID.
@@ -106,10 +184,18 @@ public interface IUserRepository
     /// <summary>
     /// Creates a new refresh token.
     /// </summary>
-    Task CreateRefreshTokenAsync(RefreshToken token);
+    Task CreateRefreshTokenAsync(RefreshToken token, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Updates a refresh token (e.g., to revoke it).
+    /// Atomically consumes a valid refresh token. Returns false when another request already consumed it.
+    /// </summary>
+    Task<bool> TryConsumeRefreshTokenAsync(
+        string hashedToken,
+        DateTime utcNow,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Updates a refresh token (e.g., to revoke it during logout).
     /// </summary>
     Task UpdateRefreshTokenAsync(RefreshToken token);
 

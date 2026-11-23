@@ -12,5 +12,5 @@ public interface IFlagService
     /// Creates a flag/report against another user for a specific ride.
     /// Status defaults to Open. Admin resolves as Dismissed or ActionTaken.
     /// </summary>
-    Task<ApiResponse<object>> CreateFlagAsync(Guid reporterId, FlagDto dto);
+    Task<ApiResponse<object>> CreateFlagAsync(Guid reporterId, FlagDto dto, CancellationToken cancellationToken = default);
 }

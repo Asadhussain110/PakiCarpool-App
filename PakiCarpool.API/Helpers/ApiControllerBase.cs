@@ -42,6 +42,18 @@ public abstract class ApiControllerBase : ControllerBase
         if (response.IsSuccess)
             return Ok(new { data = response.Data, message = response.Message });
 
+        if (response.ErrorCode is not null)
+        {
+            var (errorStatusCode, mappedErrorCode, errorMessage) = MapError($"{response.ErrorCode}:{response.Message}");
+            return StatusCode(errorStatusCode, new ApiErrorResponse
+            {
+                StatusCode = errorStatusCode,
+                Error = mappedErrorCode,
+                Message = errorMessage,
+                BannedUntil = response.BannedUntil
+            });
+        }
+
         var (statusCode, errorCode, message) = MapError(response.Message);
         return StatusCode(statusCode, ErrorResponse.Create(statusCode, errorCode, message));
     }
@@ -68,10 +80,11 @@ public abstract class ApiControllerBase : ControllerBase
 
         var statusCode = codePart switch
         {
-            ErrorCodes.Unauthorized or ErrorCodes.TokenExpired => StatusCodes.Status401Unauthorized,
+            ErrorCodes.Unauthorized or ErrorCodes.TokenExpired or ErrorCodes.LivenessRequired => StatusCodes.Status401Unauthorized,
             ErrorCodes.Forbidden => StatusCodes.Status403Forbidden,
             ErrorCodes.NotFound => StatusCodes.Status404NotFound,
-            ErrorCodes.BookingTimeout or ErrorCodes.LivenessFailed or ErrorCodes.AccountLocked
+            ErrorCodes.AccountLocked => StatusCodes.Status401Unauthorized,
+            ErrorCodes.BookingTimeout or ErrorCodes.LivenessFailed
                 or ErrorCodes.AccountSuspended or ErrorCodes.LivenessBanned => StatusCodes.Status409Conflict,
             ErrorCodes.RateLimitExceeded => StatusCodes.Status429TooManyRequests,
             ErrorCodes.InternalError => StatusCodes.Status500InternalServerError,
@@ -98,7 +111,7 @@ public abstract class ApiControllerBase : ControllerBase
         ErrorCodes.Forbidden => "You do not have permission to perform this action.",
         ErrorCodes.NotFound => "The requested resource was not found.",
         ErrorCodes.BookingTimeout => "The booking request has timed out.",
-        ErrorCodes.AccountLocked => "Account is temporarily locked.",
+        ErrorCodes.AccountLocked => "Too many failed login attempts. Try again later.",
         ErrorCodes.AccountSuspended => "Account is suspended.",
         ErrorCodes.RateLimitExceeded => "Too many requests. Please slow down.",
         ErrorCodes.InternalError => "An unexpected server error occurred.",

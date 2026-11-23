@@ -1,3 +1,4 @@
+using PakiCarpool.Domain.DTOs.Passenger;
 using PakiCarpool.Domain.Models;
 
 namespace PakiCarpool.Interfaces.IRepositories;
@@ -11,7 +12,7 @@ public interface IRideRepository
     /// <summary>
     /// Gets a ride by ID, optionally including stops and bookings.
     /// </summary>
-    Task<Ride?> GetByIdAsync(Guid rideId, bool includeStops = false, bool includeBookings = false);
+    Task<Ride?> GetByIdAsync(Guid rideId, bool includeStops = false, bool includeBookings = false, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets the active (Posted or Active) ride for a driver.
@@ -19,9 +20,29 @@ public interface IRideRepository
     Task<Ride?> GetActiveRideByDriverIdAsync(Guid driverProfileId);
 
     /// <summary>
+    /// Checks whether a user's driver profile has an active ride.
+    /// </summary>
+    Task<bool> HasActiveRideForUserAsync(Guid userId);
+
+    /// <summary>
+    /// Gets the user's most recently created driver ride.
+    /// </summary>
+    Task<Ride?> GetMostRecentRideForUserAsync(Guid userId);
+
+    /// <summary>
     /// Gets all rides with Posted status (available for booking), with pagination.
     /// </summary>
     Task<(List<Ride> Items, int TotalCount)> GetAvailableRidesPaginatedAsync(int page, int pageSize);
+
+    /// <summary>
+    /// Gets active rides and upcoming stop candidates within range of the requested coordinates.
+    /// </summary>
+    Task<List<RideSearchCandidateDto>> GetCandidateRidesAsync(
+        double startLat,
+        double startLng,
+        double endLat,
+        double endLng,
+        double radiusMeters);
 
     /// <summary>
     /// Gets all rides with pagination (admin view).
@@ -41,7 +62,7 @@ public interface IRideRepository
     /// <summary>
     /// Gets a ride stop by ID.
     /// </summary>
-    Task<RideStop?> GetStopByIdAsync(Guid stopId);
+    Task<RideStop?> GetStopByIdAsync(Guid stopId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Updates a ride stop (e.g., marking as completed).

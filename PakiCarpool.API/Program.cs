@@ -1,12 +1,18 @@
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using StackExchange.Redis;
+using PakiCarpool.API.Configuration;
+using PakiCarpool.API.Health;
 using PakiCarpool.API.Helpers;
 using PakiCarpool.API.Hubs;
 using PakiCarpool.API.Middleware;
+using PakiCarpool.Common;
 using PakiCarpool.Interfaces.IRepositories;
 using PakiCarpool.Interfaces.IServices;
 using PakiCarpool.Repository.Dapper;
@@ -17,9 +23,13 @@ using PakiCarpool.Security.Middleware;
 using PakiCarpool.Security.Policies;
 using PakiCarpool.Services.BackgroundJobs;
 using PakiCarpool.Services.Implementations;
+using PakiCarpool.Services.Options;
 using System.Text;
 
+LoadDotEnv();
+
 var builder = WebApplication.CreateBuilder(args);
+RequiredConfigurationValidator.Validate(builder.Configuration, requireRedis: !builder.Environment.IsDevelopment());
 
 // ─────────────────────────────────────────────────────────────
 //  1. CONTROLLERS + JSON
@@ -34,8 +44,9 @@ builder.Services.AddControllers()
 // ─────────────────────────────────────────────────────────────
 //  2. DATABASE — EF Core + PostgreSQL + Dapper factory
 // ─────────────────────────────────────────────────────────────
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? throw new InvalidOperationException("Connection string 'DefaultConnection' is not configured.");
+var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING");
+if (string.IsNullOrWhiteSpace(connectionString))
+    throw new InvalidOperationException("DB_CONNECTION_STRING is not configured. Set the single Supabase Postgres connection string before starting the backend.");
 
 builder.Services.AddDbContext<PakiCarpoolDbContext>((serviceProvider, options) =>
 {
@@ -56,6 +67,7 @@ builder.Services.AddDbContext<PakiCarpoolDbContext>((serviceProvider, options) =
 
 builder.Services.AddSingleton<IDapperConnectionFactory>(_ => new NpgsqlConnectionFactory(connectionString));
 builder.Services.AddScoped<SeatCapacityQuery>();
+builder.Services.AddScoped<RideSearchQuery>();
 builder.Services.AddScoped<RideAnalyticsQuery>();
 builder.Services.AddScoped<LiveLocationQuery>();
 builder.Services.AddScoped<ReportQuery>();
@@ -68,42 +80,126 @@ builder.Services.AddScoped<IRideRepository, RideRepository>();
 builder.Services.AddScoped<IBookingRepository, BookingRepository>();
 builder.Services.AddScoped<IChatRepository, ChatRepository>();
 builder.Services.AddScoped<IAdminRepository, AdminRepository>();
+builder.Services.AddScoped<ILivenessChallengeRepository, LivenessChallengeRepository>();
 
 // ─────────────────────────────────────────────────────────────
 //  4. SECURITY HELPERS
 // ─────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<JwtHelper>();
 builder.Services.AddSingleton<AesEncryptionHelper>();
+builder.Services.AddSingleton<ITokenRevocationService, TokenRevocationService>();
 
 // ─────────────────────────────────────────────────────────────
-//  5. APPLICATION SERVICES (11)
+//  5. APPLICATION SERVICES
 // ─────────────────────────────────────────────────────────────
+builder.Services.AddScoped<IUserSessionService, UserSessionService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IDriverService, DriverService>();
 builder.Services.AddScoped<IPassengerService, PassengerService>();
+builder.Services.AddScoped<IRideSearchService, RideSearchService>();
+builder.Services.AddHttpClient<IPlacesService, PlacesService>();
 builder.Services.AddScoped<IChatService, ChatService>();
 builder.Services.AddScoped<IAdminService, AdminService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ILivenessService, LivenessService>();
+builder.Services.AddSingleton<Supabase.Client>(_ => new Supabase.Client(
+    builder.Configuration["SUPABASE_URL"] ?? Environment.GetEnvironmentVariable("SUPABASE_URL") ?? string.Empty,
+    builder.Configuration["SUPABASE_KEY"] ?? Environment.GetEnvironmentVariable("SUPABASE_KEY") ?? string.Empty,
+    new Supabase.SupabaseOptions { AutoConnectRealtime = false }));
+builder.Services.AddSingleton<IStorageService, SupabaseStorageService>();
 builder.Services.AddScoped<ITrustService, TrustService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IFlagService, FlagService>();
 builder.Services.AddScoped<IRatingService, RatingService>();
 builder.Services.AddHttpClient<IHCaptchaService, HCaptchaService>();
+builder.Services.AddHttpClient("GoogleOAuth", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(15);
+});
+builder.Services.Configure<RideSearchOptions>(
+    builder.Configuration.GetSection(RideSearchOptions.SectionName));
+builder.Services.Configure<PhotonOptions>(
+    builder.Configuration.GetSection(PhotonOptions.SectionName));
 
 // ─────────────────────────────────────────────────────────────
-//  6. BACKGROUND JOBS (5)
+//  6. BACKGROUND JOBS (7)
 // ─────────────────────────────────────────────────────────────
+builder.Services.AddHostedService<HubThrottleCleanupService>();
 builder.Services.AddHostedService<BookingTimeoutJob>();
 builder.Services.AddHostedService<ChatExpiryJob>();
 builder.Services.AddHostedService<RefreshTokenCleanupJob>();
 builder.Services.AddHostedService<TrustScoreJob>();
 builder.Services.AddHostedService<RideGraceExpiryJob>();
+builder.Services.AddHostedService<LivenessChallengeCleanupJob>();
 
 // ─────────────────────────────────────────────────────────────
 //  7. SIGNALR
 // ─────────────────────────────────────────────────────────────
-builder.Services.AddSignalR();
+var redisConnectionString = builder.Configuration["REDIS_CONNECTION_STRING"];
+if (string.IsNullOrWhiteSpace(redisConnectionString))
+    redisConnectionString = builder.Configuration["Redis:ConnectionString"];
+
+IConnectionMultiplexer? developmentRedisConnection = null;
+if (builder.Environment.IsDevelopment())
+{
+    if (string.IsNullOrWhiteSpace(redisConnectionString))
+    {
+        using var loggerFactory = LoggerFactory.Create(logging => logging.AddConsole());
+        loggerFactory.CreateLogger("PakiCarpool.API")
+            .LogWarning("Redis is unset; using in-memory SignalR and local development state.");
+    }
+    else
+    {
+        try
+        {
+            var redisOptions = ConfigurationOptions.Parse(redisConnectionString);
+            redisOptions.AbortOnConnectFail = true;
+            redisOptions.ConnectTimeout = 2000;
+            redisOptions.ConnectRetry = 0;
+            developmentRedisConnection = ConnectionMultiplexer.Connect(redisOptions);
+        }
+        catch (Exception exception) when (
+            exception is RedisConnectionException
+                or TimeoutException
+                or System.Net.Sockets.SocketException
+                or ArgumentException
+                or FormatException)
+        {
+            redisConnectionString = null;
+            using var loggerFactory = LoggerFactory.Create(logging => logging.AddConsole());
+            loggerFactory.CreateLogger("PakiCarpool.API")
+                .LogWarning("Redis is unreachable; using in-memory SignalR and local development state.");
+        }
+    }
+}
+
+if (!string.IsNullOrWhiteSpace(redisConnectionString))
+{
+    if (developmentRedisConnection is not null)
+        builder.Services.AddSingleton<IConnectionMultiplexer>(developmentRedisConnection);
+    else
+        builder.Services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnectionString));
+    builder.Services.AddSingleton<IRateLimitCounter, RedisRateLimitCounter>();
+    builder.Services.AddSingleton<IRideGroupConnectionTracker, RedisRideGroupConnectionTracker>();
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = redisConnectionString;
+    });
+    builder.Services.AddSignalR(options => options.AddFilter<ActiveUserHubFilter>())
+        .AddStackExchangeRedis(redisConnectionString, options =>
+        {
+            options.Configuration.ChannelPrefix = RedisChannel.Literal("pakicarpool");
+        });
+    builder.Services.AddSingleton<IOAuthStateStore, RedisOAuthStateStore>();
+}
+else
+{
+    builder.Services.AddDistributedMemoryCache();
+    builder.Services.AddSingleton<IRateLimitCounter, InMemoryRateLimitCounter>();
+    builder.Services.AddSingleton<IRideGroupConnectionTracker, InMemoryRideGroupConnectionTracker>();
+    builder.Services.AddSignalR(options => options.AddFilter<ActiveUserHubFilter>());
+    builder.Services.AddSingleton<IOAuthStateStore, OAuthStateStore>();
+}
 builder.Services.AddSingleton<IUserIdProvider, NameUserIdProvider>();
 builder.Services.AddSingleton<IHubContext<Hub>>(sp =>
     new HubContextBridge(sp.GetRequiredService<IHubContext<PakiCarpoolHub>>()));
@@ -139,14 +235,17 @@ builder.Services.AddHsts(options =>
 //  10. AUTHENTICATION — JWT Bearer (+ SignalR access_token)
 // ─────────────────────────────────────────────────────────────
 var jwtSecret = builder.Configuration["JWT_SECRET"]
+    ?? Environment.GetEnvironmentVariable("JWT_SECRET")
     ?? builder.Configuration["Jwt:Secret"]
     ?? throw new InvalidOperationException("JWT secret is not configured. Set JWT_SECRET env var or Jwt:Secret in appsettings.");
 
 var jwtIssuer = builder.Configuration["JWT_ISSUER"]
+    ?? Environment.GetEnvironmentVariable("JWT_ISSUER")
     ?? builder.Configuration["Jwt:Issuer"]
     ?? "api.pakicarpool.pk";
 
 var jwtAudience = builder.Configuration["JWT_AUDIENCE"]
+    ?? Environment.GetEnvironmentVariable("JWT_AUDIENCE")
     ?? builder.Configuration["Jwt:Audience"]
     ?? "pakicarpool-clients";
 
@@ -166,7 +265,7 @@ builder.Services.AddAuthentication(options =>
         ValidateIssuerSigningKey = true,
         IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
         ValidateLifetime = true,
-        ClockSkew = TimeSpan.FromMinutes(5)
+        ClockSkew = JwtHelper.ValidationClockSkew
     };
 
     options.Events = new JwtBearerEvents
@@ -181,7 +280,8 @@ builder.Services.AddAuthentication(options =>
             }
 
             return Task.CompletedTask;
-        }
+        },
+        OnTokenValidated = AccountAccessValidator.ValidateTokenAsync
     };
 });
 
@@ -189,6 +289,9 @@ builder.Services.AddAuthentication(options =>
 //  11. AUTHORIZATION — Role-based policies
 // ─────────────────────────────────────────────────────────────
 builder.Services.AddAuthorization(RolePolicy.Configure);
+
+builder.Services.AddHealthChecks()
+    .AddCheck<DatabaseHealthCheck>("database");
 
 // ─────────────────────────────────────────────────────────────
 //  12. SWAGGER / OPENAPI
@@ -235,6 +338,11 @@ builder.Services.AddSwaggerGen(options =>
 // ─────────────────────────────────────────────────────────────
 var app = builder.Build();
 
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+});
+
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 
 var enableSwagger = app.Configuration.GetValue("Swagger:Enable", app.Environment.IsDevelopment());
@@ -248,28 +356,44 @@ if (enableSwagger)
     });
 }
 
-app.UseHttpsRedirection();
-
 if (!app.Environment.IsDevelopment())
 {
+    app.UseHttpsRedirection();
     app.UseHsts();
 }
 
 app.UseCors("PakiCarpoolPolicy");
 app.UseMiddleware<RateLimitingMiddleware>();
-app.UseMiddleware<JwtMiddleware>();
 app.UseAuthentication();
+app.UseMiddleware<ClientIdRateLimitMiddleware>();
+app.UseMiddleware<LocationRateLimitMiddleware>();
 app.UseAuthorization();
 
 app.MapControllers();
 app.MapHub<PakiCarpoolHub>("/hubs/pakicarpool");
-
-var aesEncryptionHelper = app.Services.GetRequiredService<AesEncryptionHelper>();
-var passwordHash = BCryptHelper.HashPassword("AdminPassword123!");
-var totpSecret = TotpHelper.GenerateSecret();
-var encryptedTotpSecret = aesEncryptionHelper.Encrypt(totpSecret);
-Console.Error.WriteLine($"PasswordHash: {passwordHash}");
-Console.Error.WriteLine($"Plain TOTP Secret: {totpSecret}");
-Console.Error.WriteLine($"Encrypted TOTP Secret: {encryptedTotpSecret}");
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = registration => registration.Name == "database"
+});
 
 app.Run();
+
+static void LoadDotEnv()
+{
+    var startDirectories = new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory };
+    foreach (var startDirectory in startDirectories)
+    {
+        for (var directory = new DirectoryInfo(startDirectory);
+             directory is not null;
+             directory = directory.Parent)
+        {
+            var envPath = Path.Combine(directory.FullName, ".env");
+            if (!File.Exists(envPath))
+                continue;
+
+            DotNetEnv.Env.NoClobber().Load(envPath);
+            return;
+        }
+    }
+}

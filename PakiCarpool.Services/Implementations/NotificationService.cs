@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
 using PakiCarpool.Domain.Enums;
+using PakiCarpool.Interfaces.IRepositories;
 using PakiCarpool.Interfaces.IServices;
 
 namespace PakiCarpool.Services.Implementations;
@@ -16,19 +17,30 @@ public class NotificationService : INotificationService
     // dynamic dispatch pattern via HubClients.Group/User string API.
     private readonly IHubContext<Microsoft.AspNetCore.SignalR.Hub> _hubContext;
     private readonly IEmailService _emailService;
+    private readonly IBookingRepository _bookingRepository;
+    private readonly IRideGroupConnectionTracker _rideGroupConnectionTracker;
 
     public NotificationService(
         IHubContext<Microsoft.AspNetCore.SignalR.Hub> hubContext,
-        IEmailService emailService)
+        IEmailService emailService,
+        IBookingRepository bookingRepository,
+        IRideGroupConnectionTracker rideGroupConnectionTracker)
     {
         _hubContext = hubContext;
         _emailService = emailService;
+        _bookingRepository = bookingRepository;
+        _rideGroupConnectionTracker = rideGroupConnectionTracker;
     }
 
     /// <summary>
     /// Sends an in-app notification via SignalR to the user's personal group (user-{userId}).
     /// </summary>
-    public async Task SendInAppNotificationAsync(Guid userId, NotificationType type, string title, string message)
+    public async Task SendInAppNotificationAsync(
+        Guid userId,
+        NotificationType type,
+        string title,
+        string message,
+        CancellationToken cancellationToken = default)
     {
         await _hubContext.Clients
             .Group($"user-{userId}")
@@ -38,7 +50,7 @@ public class NotificationService : INotificationService
                 title,
                 message,
                 timestamp = DateTime.UtcNow
-            });
+            }, cancellationToken);
     }
 
     /// <summary>
@@ -78,6 +90,28 @@ public class NotificationService : INotificationService
         }
     }
 
+    public async Task RemovePassengerFromRideGroupsAsync(
+        Guid rideId,
+        Guid passengerId,
+        CancellationToken cancellationToken = default)
+    {
+        var connectionIds = await _rideGroupConnectionTracker.GetConnectionsAsync(rideId, passengerId, cancellationToken);
+        foreach (var connectionId in connectionIds)
+        {
+            await _hubContext.Groups.RemoveFromGroupAsync(connectionId, $"ride-{rideId:D}", cancellationToken);
+            await _hubContext.Groups.RemoveFromGroupAsync(connectionId, $"ride-{rideId:D}-pax-{passengerId:D}", cancellationToken);
+        }
+
+        await _rideGroupConnectionTracker.RemoveAsync(rideId, passengerId, cancellationToken);
+    }
+
+    private async Task RemoveBookingFromRideGroupsAsync(Guid bookingId)
+    {
+        var booking = await _bookingRepository.GetByIdAsync(bookingId);
+        if (booking is not null)
+            await RemovePassengerFromRideGroupsAsync(booking.RideId, booking.PassengerId);
+    }
+
     /// <summary>
     /// Sends a push notification simulation via SignalR.
     /// This is the FCM plug-in point — replace the SignalR call with FCM SDK when ready.
@@ -108,20 +142,26 @@ public class NotificationService : INotificationService
             });
 
     /// <inheritdoc />
-    public Task SendBookingRejectedAsync(Guid passengerId, Guid bookingId, string reason)
-        => _hubContext.Clients
+    public async Task SendBookingRejectedAsync(Guid passengerId, Guid bookingId, string reason)
+    {
+        await RemoveBookingFromRideGroupsAsync(bookingId);
+        await _hubContext.Clients
             .Group($"user-{passengerId}")
             .SendAsync("BookingRejected", new
             {
                 bookingId,
                 reason
             });
+    }
 
     /// <inheritdoc />
-    public Task SendBookingAutoCancelledAsync(Guid passengerId, Guid bookingId)
-        => _hubContext.Clients
+    public async Task SendBookingAutoCancelledAsync(Guid passengerId, Guid bookingId)
+    {
+        await RemoveBookingFromRideGroupsAsync(bookingId);
+        await _hubContext.Clients
             .Group($"user-{passengerId}")
             .SendAsync("BookingAutoCancelled", new { bookingId });
+    }
 
     /// <inheritdoc />
     public Task SendDriverArrivedAtStopAsync(Guid rideId, string stopName, Guid stopId)
@@ -134,14 +174,17 @@ public class NotificationService : INotificationService
             });
 
     /// <inheritdoc />
-    public Task SendRideEndedForPassengerAsync(Guid passengerId, Guid bookingId, decimal fare)
-        => _hubContext.Clients
+    public async Task SendRideEndedForPassengerAsync(Guid passengerId, Guid bookingId, decimal fare)
+    {
+        await RemoveBookingFromRideGroupsAsync(bookingId);
+        await _hubContext.Clients
             .Group($"user-{passengerId}")
             .SendAsync("RideEndedForPassenger", new
             {
                 bookingId,
                 fare
             });
+    }
 
     /// <inheritdoc />
     public Task SendCashReceivedConfirmedAsync(Guid passengerId, Guid bookingId)
@@ -160,10 +203,13 @@ public class NotificationService : INotificationService
             });
 
     /// <inheritdoc />
-    public Task SendRideFullNotificationAsync(Guid passengerId, Guid rideId)
-        => _hubContext.Clients
+    public async Task SendRideFullNotificationAsync(Guid passengerId, Guid rideId)
+    {
+        await RemovePassengerFromRideGroupsAsync(rideId, passengerId);
+        await _hubContext.Clients
             .Group($"user-{passengerId}")
             .SendAsync("RideFullNotification", new { rideId });
+    }
 
     // ─── Private Helpers (Notification Matrix) ─────────────────────────────────
 

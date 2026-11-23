@@ -93,6 +93,27 @@ public class CarApprovalDto
     public DateTime CreatedAt { get; set; }
 }
 
+public sealed class LivenessReviewDto
+{
+    public Guid DriverId { get; set; }
+    public string DriverName { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public string SelfieUrl { get; set; } = string.Empty;
+    public DateTime SubmittedAt { get; set; }
+}
+
+public sealed class RegistrationDocumentUrlDto
+{
+    public string Url { get; set; } = string.Empty;
+}
+
+public sealed class RejectLivenessDto
+{
+    [Required]
+    [StringLength(500, MinimumLength = 10)]
+    public string Reason { get; set; } = string.Empty;
+}
+
 public class FlagListItemDto
 {
     public Guid Id { get; set; }

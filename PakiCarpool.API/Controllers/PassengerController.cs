@@ -55,8 +55,8 @@ public sealed class PassengerController : ApiControllerBase
         => FromResponse(await _passengerService.GetActiveBookingAsync(GetUserId()));
 
     /// <summary>PUT /passenger/bookings/{bookingId}/no-show — Mark driver no-show.</summary>
-    [HttpPut("bookings/{bookingId:guid}/no-show")]
+    [HttpPost("bookings/{bookingId:guid}/no-show")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> MarkDriverNoShow(Guid bookingId)
-        => FromResponse(await _passengerService.MarkDriverNoShowAsync(GetUserId(), bookingId));
+    public async Task<IActionResult> MarkDriverNoShow(Guid bookingId, CancellationToken cancellationToken)
+        => FromResponse(await _passengerService.MarkDriverNoShowAsync(GetUserId(), bookingId, cancellationToken));
 }

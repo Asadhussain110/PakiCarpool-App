@@ -23,7 +23,11 @@ public class BookingRepository : IBookingRepository
     }
 
     /// <inheritdoc />
-    public async Task<Booking?> GetByIdAsync(Guid bookingId, bool includeRide = false, bool includeStops = false)
+    public async Task<Booking?> GetByIdAsync(
+        Guid bookingId,
+        bool includeRide = false,
+        bool includeStops = false,
+        CancellationToken cancellationToken = default)
     {
         IQueryable<Booking> query = _context.Bookings;
 
@@ -38,7 +42,7 @@ public class BookingRepository : IBookingRepository
 
         query = query.Include(b => b.Passenger);
 
-        return await query.FirstOrDefaultAsync(b => b.Id == bookingId);
+        return await query.FirstOrDefaultAsync(b => b.Id == bookingId, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -59,7 +63,7 @@ public class BookingRepository : IBookingRepository
     }
 
     /// <inheritdoc />
-    public async Task<List<Booking>> GetBookingsByRideIdAsync(Guid rideId)
+    public async Task<List<Booking>> GetBookingsByRideIdAsync(Guid rideId, CancellationToken cancellationToken = default)
     {
         return await _context.Bookings
             .Include(b => b.Passenger)
@@ -67,7 +71,29 @@ public class BookingRepository : IBookingRepository
             .Include(b => b.DropoffStop)
             .Where(b => b.RideId == rideId)
             .OrderBy(b => b.RequestedAt)
+            .ToListAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<(List<Booking> Items, int TotalCount)> GetBookingsByRideIdAsync(
+        Guid rideId,
+        int page,
+        int pageSize)
+    {
+        var query = _context.Bookings
+            .Include(b => b.Passenger)
+            .Include(b => b.PickupStop)
+            .Include(b => b.DropoffStop)
+            .Where(b => b.RideId == rideId)
+            .OrderBy(b => b.RequestedAt);
+
+        var totalCount = await query.CountAsync();
+        var items = await query
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
             .ToListAsync();
+
+        return (items, totalCount);
     }
 
     /// <inheritdoc />

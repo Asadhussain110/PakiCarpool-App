@@ -40,5 +40,5 @@ public interface IPassengerService
     /// <summary>
     /// Reports driver no-show after 3-minute wait. Deducts 10 trust points from driver.
     /// </summary>
-    Task<ApiResponse<object>> MarkDriverNoShowAsync(Guid passengerId, Guid bookingId);
+    Task<ApiResponse<object>> MarkDriverNoShowAsync(Guid passengerId, Guid bookingId, CancellationToken cancellationToken = default);
 }
