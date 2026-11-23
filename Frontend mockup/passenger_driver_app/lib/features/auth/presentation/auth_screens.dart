@@ -10,13 +10,17 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../../core/network/api_client.dart';
+import '../../../core/realtime/signalr_service.dart';
 import '../../../core/theme/route_atlas_theme.dart';
 import '../data/auth_repository.dart';
 import '../models/app_session.dart';
 import '../models/auth_session.dart';
 import 'captcha_challenge.dart';
 
-const hCaptchaSiteKey = String.fromEnvironment('HCAPTCHA_SITE_KEY');
+const hCaptchaSiteKey = String.fromEnvironment(
+  'HCAPTCHA_SITE_KEY',
+  defaultValue: localBuild ? localHCaptchaSiteKey : '',
+);
 
 class WelcomeScreen extends StatelessWidget {
   const WelcomeScreen({super.key});
@@ -196,14 +200,9 @@ class _RouteAtlasPainter extends CustomPainter {
 }
 
 class ResetPasswordScreen extends ConsumerStatefulWidget {
-  const ResetPasswordScreen({
-    required this.email,
-    required this.token,
-    super.key,
-  });
+  const ResetPasswordScreen({required this.email, super.key});
 
   final String email;
-  final String token;
 
   @override
   ConsumerState<ResetPasswordScreen> createState() =>
@@ -213,6 +212,7 @@ class ResetPasswordScreen extends ConsumerStatefulWidget {
 class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
   final _password = TextEditingController();
   final _confirm = TextEditingController();
+  final _code = TextEditingController();
   bool _submitting = false;
   String? _error;
   String? _notice;
@@ -221,6 +221,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
   void dispose() {
     _password.dispose();
     _confirm.dispose();
+    _code.dispose();
     super.dispose();
   }
 
@@ -239,10 +240,8 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
   }
 
   Future<void> _submit() async {
-    if (widget.email.isEmpty || widget.token.isEmpty) {
-      setState(
-        () => _error = 'This reset link is incomplete. Request a new one.',
-      );
+    if (widget.email.isEmpty || !RegExp(r'^\d{6}$').hasMatch(_code.text)) {
+      setState(() => _error = 'Enter the 6-digit code from your email.');
       return;
     }
     final passwordError = _validatePassword(_password.text);
@@ -263,7 +262,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
           .read(authRepositoryProvider)
           .resetPassword(
             email: widget.email,
-            token: widget.token,
+            code: _code.text,
             newPassword: _password.text,
           );
       if (mounted) {
@@ -294,8 +293,16 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
             ),
           ),
           const SizedBox(height: 8),
-          Text('Resetting account for ${widget.email}.'),
+          Text('Enter the code sent to ${widget.email}.'),
           const SizedBox(height: 22),
+          TextField(
+            controller: _code,
+            keyboardType: TextInputType.number,
+            maxLength: 6,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(labelText: 'Email code'),
+          ),
+          const SizedBox(height: 14),
           TextField(
             controller: _password,
             obscureText: true,
@@ -337,9 +344,14 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
 }
 
 class LoginScreen extends ConsumerStatefulWidget {
-  const LoginScreen({this.verifiedEmail = false, super.key});
+  const LoginScreen({
+    this.verifiedEmail = false,
+    this.sessionExpired = false,
+    super.key,
+  });
 
   final bool verifiedEmail;
+  final bool sessionExpired;
 
   @override
   ConsumerState<LoginScreen> createState() => _LoginScreenState();
@@ -355,11 +367,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   String? _captchaToken;
   String? _errorMessage;
   String? _noticeMessage;
+  final _serverAddressController = TextEditingController(text: apiBaseUrl);
 
   @override
   void initState() {
     super.initState();
-    if (widget.verifiedEmail) {
+    if (widget.sessionExpired) {
+      _noticeMessage = 'Your session has expired. Please log in again.';
+    } else if (widget.verifiedEmail) {
       _noticeMessage = 'Email verified. You can sign in now.';
     }
   }
@@ -368,7 +383,39 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _serverAddressController.dispose();
     super.dispose();
+  }
+
+  Future<void> _saveServerAddress() async {
+    try {
+      final address = normalizeApiBaseUrl(_serverAddressController.text);
+      await ref
+          .read(secureStorageProvider)
+          .write(key: apiBaseUrlStorageKey, value: address);
+      ref.read(apiClientProvider).setBaseUrl(address);
+      if (mounted) {
+        setState(() {
+          _serverAddressController.text = address;
+          _noticeMessage = 'Server address saved.';
+          _errorMessage = null;
+        });
+      }
+    } on FormatException catch (error) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = error.message;
+          _noticeMessage = null;
+        });
+      }
+    } on Exception catch (_) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Server address could not be saved.';
+          _noticeMessage = null;
+        });
+      }
+    }
   }
 
   Future<void> _signIn() async {
@@ -397,6 +444,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           );
       if (!mounted) return;
       ref.read(appSessionProvider.notifier).set(session);
+      unawaited(ref.read(signalRServiceProvider).connect().catchError((_) {}));
       _captchaRequired = false;
       _captchaToken = null;
       context.go(
@@ -491,6 +539,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   Future<void> _googleSignIn() async {
+    if (localBuild) return;
     final role = await _chooseRole();
     if (role == null || !mounted) return;
     setState(() {
@@ -508,6 +557,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       );
       if (!mounted || session == null) return;
       ref.read(appSessionProvider.notifier).set(session);
+      unawaited(ref.read(signalRServiceProvider).connect().catchError((_) {}));
       context.go(
         session.role == PakiRole.driver && session.livenessPending
             ? '/driver/liveness'
@@ -561,6 +611,25 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       ),
                     ),
                     const SizedBox(height: 30),
+                    if (localBuild) ...[
+                      _fieldLabel('Server address'),
+                      TextFormField(
+                        controller: _serverAddressController,
+                        keyboardType: TextInputType.url,
+                        autocorrect: false,
+                        decoration: const InputDecoration(
+                          hintText: 'http://192.168.1.10:58240/api/v1',
+                        ),
+                      ),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: _submitting ? null : _saveServerAddress,
+                          child: const Text('Save server address'),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     _fieldLabel('Email'),
                     _emailField(),
                     const SizedBox(height: 18),
@@ -593,10 +662,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     ],
                     const SizedBox(height: 14),
                     _primaryButton(),
-                    const SizedBox(height: 22),
-                    const _AlternativeDivider(),
-                    const SizedBox(height: 18),
-                    _googleButton(),
+                    if (!localBuild) ...[
+                      const SizedBox(height: 22),
+                      const _AlternativeDivider(),
+                      const SizedBox(height: 18),
+                      _googleButton(),
+                    ],
                     const SizedBox(height: 28),
                     Wrap(
                       alignment: WrapAlignment.center,
@@ -748,6 +819,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   Widget _googleButton() {
+    if (localBuild) return const SizedBox.shrink();
     if (Platform.isIOS) {
       return SizedBox(
         width: double.infinity,
@@ -1084,7 +1156,7 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
     super.dispose();
   }
 
-  Future<void> _sendResetLink() async {
+  Future<void> _sendResetCode() async {
     if (!_email.text.contains('@')) {
       setState(() {
         _message = 'Enter a valid email address.';
@@ -1101,10 +1173,9 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
           .read(authRepositoryProvider)
           .forgotPassword(email: _email.text.trim());
       if (mounted) {
-        setState(() {
-          _message = 'If this email is registered, a reset link has been sent.';
-          _failed = false;
-        });
+        context.go(
+          '/reset-password?email=${Uri.encodeQueryComponent(_email.text.trim())}',
+        );
       }
     } on ApiFailure catch (failure) {
       if (mounted) {
@@ -1143,7 +1214,7 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
               ),
             ),
             const SizedBox(height: 10),
-            const Text('Enter your email and we will send a reset link.'),
+            const Text('Enter your email and we will send a reset code.'),
             const SizedBox(height: 24),
             TextField(
               controller: _email,
@@ -1157,10 +1228,10 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
             ],
             const SizedBox(height: 24),
             FilledButton(
-              onPressed: _submitting ? null : _sendResetLink,
+              onPressed: _submitting ? null : _sendResetCode,
               child: _submitting
                   ? const CircularProgressIndicator()
-                  : const Text('Send reset link'),
+                  : const Text('Send reset code'),
             ),
           ],
         ),

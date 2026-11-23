@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -20,6 +21,12 @@ import 'features/shared/role_home_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   const storage = FlutterSecureStorage();
+  if (localBuild) {
+    final savedApiBaseUrl = await storage.read(key: apiBaseUrlStorageKey);
+    if (savedApiBaseUrl != null) {
+      apiBaseUrl = normalizeApiBaseUrl(savedApiBaseUrl);
+    }
+  }
   final metadata = await storage.read(key: sessionMetadataStorageKey);
   if (metadata != null) {
     try {
@@ -37,9 +44,13 @@ Future<void> main() async {
 }
 
 final appRouterProvider = Provider<GoRouter>((ref) {
+  final restoredSession = ref.read(appSessionProvider);
   final router = GoRouter(
-    initialLocation: ref.read(appSessionProvider) == null
+    initialLocation: restoredSession == null
         ? '/welcome'
+        : restoredSession.role == PakiRole.driver &&
+              restoredSession.livenessPending
+        ? '/driver/liveness'
         : '/home',
     routes: [
       GoRoute(
@@ -50,6 +61,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: '/login',
         builder: (context, state) => LoginScreen(
           verifiedEmail: state.uri.queryParameters['verified'] == '1',
+          sessionExpired: state.uri.queryParameters['expired'] == '1',
         ),
       ),
       GoRoute(
@@ -71,7 +83,6 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: '/reset-password',
         builder: (context, state) => ResetPasswordScreen(
           email: state.uri.queryParameters['email'] ?? '',
-          token: state.uri.queryParameters['token'] ?? '',
         ),
       ),
       GoRoute(
@@ -95,6 +106,15 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/driver/car',
         builder: (context, state) => const CarRegistrationScreen(),
+      ),
+      GoRoute(
+        path: '/driver/car/status',
+        builder: (context, state) => const DriverCarStatusScreen(),
+      ),
+      GoRoute(
+        path: '/driver/car/:carId/edit',
+        builder: (context, state) =>
+            CarRegistrationScreen(carId: state.pathParameters['carId']!),
       ),
       GoRoute(
         path: '/driver/liveness',
@@ -130,12 +150,66 @@ final appRouterProvider = Provider<GoRouter>((ref) {
   return router;
 });
 
-class PakiCarpoolApp extends ConsumerWidget {
+class PakiCarpoolApp extends ConsumerStatefulWidget {
   const PakiCarpoolApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PakiCarpoolApp> createState() => _PakiCarpoolAppState();
+}
+
+class _PakiCarpoolAppState extends ConsumerState<PakiCarpoolApp>
+    with WidgetsBindingObserver {
+  Timer? _tokenRefreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _tokenRefreshTimer = Timer.periodic(const Duration(minutes: 4), (_) {
+      unawaited(ref.read(apiClientProvider).refreshIfExpiring());
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(ref.read(apiClientProvider).refreshIfExpiring());
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _tokenRefreshTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final router = ref.watch(appRouterProvider);
+    final apiClient = ref.watch(apiClientProvider);
+    apiClient.onLivenessRequired = () {
+      final session = ref.read(appSessionProvider);
+      if (session != null) {
+        ref
+            .read(appSessionProvider.notifier)
+            .set(
+              AuthSession(
+                accessToken: '',
+                userId: session.userId,
+                email: session.email,
+                fullName: session.fullName,
+                role: PakiRole.driver,
+                livenessPending: true,
+              ),
+            );
+      }
+      router.go('/driver/liveness');
+    };
+    apiClient.onSessionExpired = () {
+      ref.read(appSessionProvider.notifier).clear();
+      router.go('/login?expired=1');
+    };
     if (Platform.isIOS) {
       return CupertinoApp.router(
         title: 'PakiCarpool',

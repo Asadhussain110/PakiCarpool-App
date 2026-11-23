@@ -1,13 +1,19 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:camera/camera.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:signalr_netcore/signalr_client.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/network/api_client.dart';
@@ -15,6 +21,7 @@ import '../../../core/network/mobile_api.dart';
 import '../../../core/realtime/signalr_service.dart';
 import '../../../core/theme/route_atlas_theme.dart';
 import '../../auth/models/app_session.dart';
+import '../../auth/models/auth_session.dart';
 import '../../shared/route_map.dart';
 import '../../shared/screen_parts.dart';
 
@@ -212,7 +219,9 @@ class _DriverDashboardScreenState extends ConsumerState<DriverDashboardScreen> {
 }
 
 class CarRegistrationScreen extends ConsumerStatefulWidget {
-  const CarRegistrationScreen({super.key});
+  const CarRegistrationScreen({super.key, this.carId});
+
+  final String? carId;
 
   @override
   ConsumerState<CarRegistrationScreen> createState() =>
@@ -231,7 +240,11 @@ class _CarRegistrationScreenState extends ConsumerState<CarRegistrationScreen> {
   List<Map<String, dynamic>> _statuses = const [];
   int _seats = 3;
   bool _loading = true;
+  bool _submitting = false;
+  bool _seatsChanged = false;
   String? _error;
+
+  bool get _isEditing => widget.carId != null;
 
   @override
   void initState() {
@@ -254,6 +267,26 @@ class _CarRegistrationScreenState extends ConsumerState<CarRegistrationScreen> {
           .read(mobileApiProvider)
           .getListData('driver/car/status');
       if (!mounted) return;
+      Map<String, dynamic>? editingCar;
+      if (widget.carId != null) {
+        for (final car in statuses) {
+          if (car['id']?.toString() == widget.carId) {
+            editingCar = car;
+            break;
+          }
+        }
+        if (editingCar == null) {
+          setState(() {
+            _statuses = statuses;
+            _error = 'Car details could not be found.';
+            _loading = false;
+          });
+          return;
+        }
+        _make.text = editingCar['make']?.toString() ?? '';
+        _model.text = editingCar['model']?.toString() ?? '';
+        _year.text = editingCar['year']?.toString() ?? '';
+      }
       setState(() {
         _statuses = statuses;
         _loading = false;
@@ -281,6 +314,97 @@ class _CarRegistrationScreenState extends ConsumerState<CarRegistrationScreen> {
       imageQuality: 85,
     );
     if (mounted && image != null) setState(() => _registrationPhoto = image);
+  }
+
+  Future<String> _uploadCarDocument(
+    XFile image, {
+    required bool registration,
+  }) async {
+    final file = await MultipartFile.fromFile(image.path, filename: image.name);
+    final result = await ref
+        .read(mobileApiProvider)
+        .postData(
+          'driver/car/documents',
+          body: FormData.fromMap({
+            'file': file,
+            'documentType': registration ? 'registration' : 'carPhoto',
+          }),
+        );
+    final path = result['path']?.toString();
+    if (path == null || path.isEmpty) {
+      throw const ApiFailure(
+        message: 'The server did not return the uploaded document path.',
+      );
+    }
+    return path;
+  }
+
+  Future<void> _submitCar() async {
+    if (!_formKey.currentState!.validate()) return;
+    if (!_isEditing && _carPhotos.isEmpty) {
+      setState(() => _error = 'Choose at least one exterior photo.');
+      return;
+    }
+    if (!_isEditing && _registrationPhoto == null) {
+      setState(() => _error = 'Choose the vehicle registration document.');
+      return;
+    }
+
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    try {
+      final body = <String, dynamic>{
+        'make': _make.text.trim(),
+        'model': _model.text.trim(),
+        'year': int.parse(_year.text.trim()),
+      };
+      if (_isEditing) {
+        final licensePlate = _plate.text.trim();
+        if (licensePlate.isNotEmpty) body['licensePlate'] = licensePlate;
+        if (_seatsChanged) body['availableSeats'] = _seats;
+        if (_carPhotos.isNotEmpty) {
+          body['photoPaths'] = [
+            for (final image in _carPhotos)
+              await _uploadCarDocument(image, registration: false),
+          ];
+        }
+        if (_registrationPhoto != null) {
+          body['regDocPath'] = await _uploadCarDocument(
+            _registrationPhoto!,
+            registration: true,
+          );
+        }
+        await ref
+            .read(mobileApiProvider)
+            .putData('driver/car/${widget.carId}', body: body);
+      } else {
+        body.addAll({
+          'licensePlate': _plate.text.trim(),
+          'availableSeats': _seats,
+          'photoPaths': [
+            for (final image in _carPhotos)
+              await _uploadCarDocument(image, registration: false),
+          ],
+          'regDocPath': await _uploadCarDocument(
+            _registrationPhoto!,
+            registration: true,
+          ),
+        });
+        await ref.read(mobileApiProvider).postData('driver/car', body: body);
+      }
+      if (!mounted) return;
+      context.go('/driver/car/status');
+    } on ApiFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = 'Could not submit the car details: $error');
+      }
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
   }
 
   Widget _textField(
@@ -312,14 +436,23 @@ class _CarRegistrationScreenState extends ConsumerState<CarRegistrationScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Car approval')),
+    appBar: AppBar(
+      title: Text(_isEditing ? 'Edit car' : 'Car approval'),
+      actions: [
+        IconButton(
+          tooltip: 'Car status',
+          onPressed: () => context.push('/driver/car/status'),
+          icon: const Icon(Icons.fact_check_outlined),
+        ),
+      ],
+    ),
     body: _loading
         ? const LoadingPane(label: 'Loading vehicle status')
         : ListView(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
             children: [
               Text(
-                'Register your car',
+                _isEditing ? 'Update your car' : 'Register your car',
                 style: Theme.of(context).textTheme.headlineSmall,
               ),
               const SizedBox(height: 5),
@@ -355,17 +488,26 @@ class _CarRegistrationScreenState extends ConsumerState<CarRegistrationScreen> {
                     _textField(
                       _plate,
                       'License plate',
-                      required: true,
+                      required: !_isEditing,
                       maxLength: 20,
                     ),
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        const Expanded(child: Text('Available seats')),
+                        Expanded(
+                          child: Text(
+                            _isEditing
+                                ? 'Available seats (optional update)'
+                                : 'Available seats',
+                          ),
+                        ),
                         IconButton(
                           tooltip: 'Remove one seat',
                           onPressed: _seats > 1
-                              ? () => setState(() => _seats--)
+                              ? () => setState(() {
+                                  _seats--;
+                                  _seatsChanged = true;
+                                })
                               : null,
                           icon: const Icon(Icons.remove_circle_outline),
                         ),
@@ -376,7 +518,10 @@ class _CarRegistrationScreenState extends ConsumerState<CarRegistrationScreen> {
                         IconButton(
                           tooltip: 'Add one seat',
                           onPressed: _seats < 6
-                              ? () => setState(() => _seats++)
+                              ? () => setState(() {
+                                  _seats++;
+                                  _seatsChanged = true;
+                                })
                               : null,
                           icon: const Icon(Icons.add_circle_outline),
                         ),
@@ -387,33 +532,191 @@ class _CarRegistrationScreenState extends ConsumerState<CarRegistrationScreen> {
                       onPressed: _pickCarPhotos,
                       icon: const Icon(Icons.photo_library_outlined),
                       label: Text(
-                        'Choose exterior photos (${_carPhotos.length})',
+                        _isEditing && _carPhotos.isEmpty
+                            ? 'Keep current exterior photos'
+                            : 'Choose exterior photos (${_carPhotos.length})',
                       ),
                     ),
                     if (_carPhotos.isNotEmpty)
-                      Text(
-                        '${_carPhotos.length} photos selected. FRD/FSD require at least two.',
-                      ),
+                      Text('${_carPhotos.length} replacement photos selected.'),
                     OutlinedButton.icon(
                       onPressed: _pickRegistrationPhoto,
                       icon: const Icon(Icons.description_outlined),
                       label: Text(
                         _registrationPhoto == null
-                            ? 'Choose registration document'
+                            ? _isEditing
+                                  ? 'Keep current registration document'
+                                  : 'Choose registration document'
                             : 'Document selected',
                       ),
                     ),
                     const SizedBox(height: 12),
-                    const NoticeStrip(
-                      message: 'Submission is unavailable: the API currently accepts file paths but has no secure upload endpoint. Your selected files have not been uploaded or sent.',
-                    ),
+                    if (_error != null)
+                      NoticeStrip(message: _error!, isError: true),
                     const SizedBox(height: 12),
-                    FilledButton(
-                      onPressed: null,
-                      child: const Text('Submit for approval'),
+                    FilledButton.icon(
+                      onPressed: _submitting ? null : _submitCar,
+                      icon: _submitting
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.upload_outlined),
+                      label: Text(
+                        _submitting
+                            ? 'Submitting...'
+                            : _isEditing
+                            ? 'Save car changes'
+                            : 'Submit for approval',
+                      ),
                     ),
                   ],
                 ),
+              ),
+            ],
+          ),
+  );
+}
+
+class DriverCarStatusScreen extends ConsumerStatefulWidget {
+  const DriverCarStatusScreen({super.key});
+
+  @override
+  ConsumerState<DriverCarStatusScreen> createState() =>
+      _DriverCarStatusScreenState();
+}
+
+class _DriverCarStatusScreenState extends ConsumerState<DriverCarStatusScreen> {
+  List<Map<String, dynamic>> _cars = const [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final cars = await ref
+          .read(mobileApiProvider)
+          .getListData('driver/car/status');
+      if (!mounted) return;
+      setState(() {
+        _cars = cars;
+        _loading = false;
+      });
+    } on ApiFailure catch (failure) {
+      if (mounted) {
+        setState(() {
+          _error = failure.message;
+          _loading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _error = 'Could not load car status. Try again.';
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  Widget _carTile(BuildContext context, Map<String, dynamic> car) {
+    final status = car['status']?.toString() ?? 'Unknown';
+    final carId = car['id']?.toString();
+    final isRejected = status.toLowerCase() == 'rejected';
+    final isApproved = status.toLowerCase() == 'approved';
+    final isPending = status.toLowerCase() == 'pending';
+    final rejectionReason = car['rejectionReason']?.toString().trim();
+
+    return Column(
+      children: [
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(
+            '${car['make'] ?? ''} ${car['model'] ?? ''} · ${car['year'] ?? ''}',
+          ),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              StateLabel(
+                status,
+                color: isRejected
+                    ? RouteAtlasColors.coral
+                    : status.toLowerCase() == 'approved'
+                    ? RouteAtlasColors.teal
+                    : RouteAtlasColors.secondaryMuted,
+              ),
+              if (isRejected) ...[
+                const SizedBox(height: 6),
+                NoticeStrip(
+                  message:
+                      'Rejection reason: ${rejectionReason?.isNotEmpty == true ? rejectionReason : 'No reason provided.'}',
+                  isError: true,
+                ),
+                TextButton.icon(
+                  onPressed: carId == null
+                      ? null
+                      : () => context.push('/driver/car/$carId/edit'),
+                  icon: const Icon(Icons.edit_outlined),
+                  label: const Text('Edit and resubmit'),
+                ),
+              ],
+            ],
+          ),
+          trailing: isApproved || isPending
+              ? IconButton(
+                  tooltip: isPending
+                      ? 'Edit pending car details'
+                      : 'Edit car details',
+                  onPressed: carId == null
+                      ? null
+                      : () => context.push('/driver/car/$carId/edit'),
+                  icon: const Icon(Icons.edit_outlined),
+                )
+              : null,
+        ),
+        const Divider(height: 1),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('Car status'),
+      actions: [
+        IconButton(
+          tooltip: 'Refresh status',
+          onPressed: _loading ? null : _load,
+          icon: const Icon(Icons.refresh),
+        ),
+      ],
+    ),
+    body: _loading
+        ? const LoadingPane(label: 'Loading car status')
+        : _error != null
+        ? ErrorPane(message: _error!, onRetry: _load)
+        : ListView(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+            children: [
+              if (_cars.isEmpty) ...[
+                const Text('No cars registered yet.'),
+                const SizedBox(height: 12),
+              ],
+              for (final car in _cars) _carTile(context, car),
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: () => context.push('/driver/car'),
+                icon: const Icon(Icons.add),
+                label: const Text('Register a car'),
               ),
             ],
           ),
@@ -617,8 +920,175 @@ class _PostRideScreenState extends ConsumerState<PostRideScreen> {
   }
 }
 
+class DriverLivenessPendingScreen extends ConsumerStatefulWidget {
+  const DriverLivenessPendingScreen({super.key});
+
+  @override
+  ConsumerState<DriverLivenessPendingScreen> createState() =>
+      _DriverLivenessPendingScreenState();
+}
+
+class _DriverLivenessPendingScreenState
+    extends ConsumerState<DriverLivenessPendingScreen> {
+  Timer? _timer;
+  bool _loading = true;
+  bool _polling = false;
+  String? _status;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _pollStatus();
+    _timer = Timer.periodic(const Duration(seconds: 10), (_) => _pollStatus());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _pollStatus() async {
+    if (_polling) return;
+    _polling = true;
+    try {
+      final result = await ref
+          .read(mobileApiProvider)
+          .getBareData('driver/liveness/status');
+      final status = result['status']?.toString();
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _status = status;
+        _error = null;
+      });
+      if (status == 'Approved') {
+        final accessToken = result['accessToken']?.toString();
+        if (accessToken == null || accessToken.isEmpty) {
+          throw const ApiFailure(
+            message: 'The server approved liveness without returning an access token.',
+          );
+        }
+        final apiClient = ref.read(apiClientProvider);
+        await apiClient.saveAccessToken(accessToken);
+        final session = ref.read(appSessionProvider);
+        if (session != null) {
+          final updatedSession = AuthSession(
+            accessToken: accessToken,
+            userId: session.userId,
+            email: session.email,
+            fullName: session.fullName,
+            role: session.role,
+            livenessPending: false,
+          );
+          ref.read(appSessionProvider.notifier).set(updatedSession);
+          await apiClient.saveSessionMetadata(
+            jsonEncode(updatedSession.toJson()),
+          );
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Liveness approved. Welcome back.')),
+          );
+          context.go('/home');
+        }
+      } else if (status == 'Rejected') {
+        final rejectionReason = result['rejectionReason']?.toString();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                rejectionReason?.isNotEmpty == true
+                    ? 'Liveness rejected: $rejectionReason'
+                    : 'Liveness was rejected.',
+              ),
+            ),
+          );
+          context.go('/driver/liveness');
+        }
+      } else if (status == 'NotSubmitted') {
+        if (mounted) context.go('/driver/liveness');
+      }
+    } on ApiFailure catch (failure) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = failure.message;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'Could not check liveness status. Try again.';
+        });
+      }
+    } finally {
+      _polling = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = _status ?? 'PendingReview';
+    final message = switch (status) {
+      'Approved' => 'Your identity check has been approved.',
+      'Rejected' => 'Your liveness check was rejected.',
+      'NotSubmitted' =>
+        'Your previous submission was not approved. Start a new live check.',
+      _ => 'Your selfie is under review. We will re-check automatically.',
+    };
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Liveness pending')),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(Icons.verified_user_outlined, size: 64),
+                const SizedBox(height: 18),
+                Text(
+                  'Verification in review',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                Text(message, textAlign: TextAlign.center),
+                const SizedBox(height: 18),
+                if (_loading)
+                  const Center(
+                    child: SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                else if (_error != null)
+                  NoticeStrip(message: _error!, isError: true),
+                const SizedBox(height: 18),
+                FilledButton(
+                  onPressed: () => context.go('/driver/liveness'),
+                  child: const Text('Retry verification'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class ActiveRideScreen extends ConsumerStatefulWidget {
-  const ActiveRideScreen({super.key});
+  const ActiveRideScreen({this.onReturnToDashboard, super.key});
+
+  final VoidCallback? onReturnToDashboard;
 
   @override
   ConsumerState<ActiveRideScreen> createState() => _ActiveRideScreenState();
@@ -628,11 +1098,13 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
   Map<String, dynamic>? _ride;
   List<Map<String, dynamic>> _bookings = const [];
   bool _loading = true;
+  bool _noActiveRide = false;
   bool _sharingLocation = false;
   String? _error;
   Timer? _locationTimer;
   bool _locating = false;
   bool _realtimeListening = false;
+  StreamSubscription<Map<String, dynamic>>? _notificationSubscription;
 
   @override
   void initState() {
@@ -644,26 +1116,30 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
     setState(() {
       _loading = true;
       _error = null;
+      _noActiveRide = false;
     });
     try {
       final api = ref.read(mobileApiProvider);
       final ride = await api.getData('driver/rides/active');
       final bookings = await api.getData('driver/rides/${ride['id']}/bookings');
-      final data = bookings['data'];
+      final items = bookings['items'];
       if (!mounted) return;
       setState(() {
         _ride = ride;
-        _bookings = data is List ? data.map(asMap).toList() : const [];
+        _bookings = items is List ? items.map(asMap).toList() : const [];
         _loading = false;
       });
+      _listenForBookingRequests();
       if ('${ride['status']}'.toLowerCase() == 'active') {
         await _startLocationSharing();
       }
-      _listenForBookingRequests();
     } on ApiFailure catch (failure) {
       if (!mounted) return;
       setState(() {
-        _error = failure.message;
+        _noActiveRide = failure.statusCode == 400 || failure.statusCode == 404;
+        _ride = null;
+        _bookings = const [];
+        _error = _noActiveRide ? null : failure.message;
         _loading = false;
       });
     }
@@ -673,8 +1149,37 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
     if (_realtimeListening) return;
     _realtimeListening = true;
     final realtime = ref.read(signalRServiceProvider);
+    _notificationSubscription = realtime.notifications.listen((notification) {
+      if (!mounted) return;
+      final message = notificationDisplayMessage(notification);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(message)));
+    });
     realtime.on('BookingRequestReceived', (_) {
       unawaited(_load());
+    });
+    realtime.on('RideFullNotification', (args) {
+      if (!mounted) return;
+      final payload = args == null || args.isEmpty
+          ? const {}
+          : asMap(args.first);
+      final message =
+          payload['message']?.toString() ?? 'This ride is now full.';
+      setState(() => _error = message);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+    });
+    realtime.on('NavigationLinkUpdated', (args) {
+      if (!mounted) return;
+      final payload = args == null || args.isEmpty
+          ? const {}
+          : asMap(args.first);
+      final label = payload['label']?.toString() ?? 'Navigation';
+      final link = payload['link']?.toString() ?? '';
+      if (link.isNotEmpty) {
+        setState(() => _error = '$label: $link');
+      }
     });
     unawaited(realtime.connect());
   }
@@ -714,11 +1219,25 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
         _locating = true;
         try {
           final position = await Geolocator.getCurrentPosition();
-          await realtime.sendLocation(
-            _ride!['id'].toString(),
-            position.latitude,
-            position.longitude,
-          );
+          final rideId = _ride!['id'].toString();
+          if (realtime.state == HubConnectionState.Connected) {
+            await realtime.sendLocation(
+              rideId,
+              position.latitude,
+              position.longitude,
+            );
+          } else {
+            await ref
+                .read(mobileApiProvider)
+                .postData(
+                  'driver/location',
+                  body: {
+                    'rideId': rideId,
+                    'lat': position.latitude,
+                    'lng': position.longitude,
+                  },
+                );
+          }
         } catch (_) {
           if (mounted) {
             setState(
@@ -763,7 +1282,7 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
       if (confirmed != true || !mounted) return;
     }
     try {
-      await ref.read(mobileApiProvider).putData('driver/bookings/$id/$action');
+      await ref.read(mobileApiProvider).postData('driver/bookings/$id/$action');
       if (action == 'cash-received') {
         final passengerId = _bookings
             .where((booking) => booking['id']?.toString() == id)
@@ -807,6 +1326,15 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
     final stops = _stops(_ride ?? const {});
     final next = stops.where((stop) => !stop.completed).firstOrNull;
     if (next == null) return;
+    try {
+      await ref
+          .read(mobileApiProvider)
+          .postData('driver/stops/${next.id}/begin-travel');
+    } on ApiFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+      return;
+    }
+    await _load();
     final uri = Uri.parse(
       'https://maps.google.com/?daddr=${next.latitude},${next.longitude}',
     );
@@ -820,7 +1348,7 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
     try {
       await ref
           .read(mobileApiProvider)
-          .putData('driver/stops/${stop.id}/arrive');
+          .postData('driver/stops/${stop.id}/arrive');
       await _load();
     } on ApiFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -830,6 +1358,10 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
   @override
   void dispose() {
     _locationTimer?.cancel();
+    final notificationSubscription = _notificationSubscription;
+    if (notificationSubscription != null) {
+      unawaited(notificationSubscription.cancel());
+    }
     super.dispose();
   }
 
@@ -837,7 +1369,43 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
   Widget build(BuildContext context) {
     if (_loading) return const LoadingPane(label: 'Loading active ride');
     if (_ride == null) {
-      return ErrorPane(message: _error ?? 'No active ride.', onRetry: _load);
+      if (_noActiveRide) {
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.route_outlined, size: 42),
+                const SizedBox(height: 12),
+                Text(
+                  'No active ride',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Post a ride from Home to start sharing your route.',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton(
+                  onPressed: _load,
+                  child: const Text('Check again'),
+                ),
+                TextButton(
+                  onPressed:
+                      widget.onReturnToDashboard ?? () => context.go('/home'),
+                  child: const Text('Return to driver home'),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+      return ErrorPane(
+        message: _error ?? 'The active ride could not be loaded.',
+        onRetry: _load,
+      );
     }
     final stops = _stops(_ride!);
     final nextStop = stops.where((stop) => !stop.completed).firstOrNull;
@@ -855,7 +1423,10 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
                   style: Theme.of(context).textTheme.headlineSmall,
                 ),
               ),
-              StateLabel(status),
+              LifecycleStatusSummary(
+                status: status,
+                kind: LifecycleStatusKind.ride,
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -898,7 +1469,7 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
               ),
               trailing: stop.completed
                   ? const Icon(Icons.check_circle_outline)
-                  : stop.id == nextStop?.id
+                  : stop.id == nextStop?.id && stop.active
                   ? TextButton(
                       onPressed: () => _arrive(stop),
                       child: const Text('Arrived'),
@@ -974,7 +1545,10 @@ class _BookingOperationRow extends StatelessWidget {
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
               ),
-              StateLabel(status),
+              LifecycleStatusSummary(
+                status: status,
+                kind: LifecycleStatusKind.booking,
+              ),
             ],
           ),
           const SizedBox(height: 4),
@@ -1002,7 +1576,7 @@ class _BookingOperationRow extends StatelessWidget {
               ],
               if (normalized == 'accepted' || normalized == 'active') ...[
                 OutlinedButton(
-                  onPressed: () => onAction(id, 'iam-here'),
+                  onPressed: () => onAction(id, 'driver-arrived'),
                   child: const Text('I am here'),
                 ),
                 if (normalized == 'active')
@@ -1044,64 +1618,476 @@ class DriverLivenessScreen extends ConsumerStatefulWidget {
       _DriverLivenessScreenState();
 }
 
+enum _LivenessPrompt { blink, turnLeft, turnRight, smile }
+
+extension on _LivenessPrompt {
+  String get label => switch (this) {
+    _LivenessPrompt.blink => 'Blink both eyes',
+    _LivenessPrompt.turnLeft => 'Turn your head to the left',
+    _LivenessPrompt.turnRight => 'Turn your head to the right',
+    _LivenessPrompt.smile => 'Smile',
+  };
+
+  String get apiValue => switch (this) {
+    _LivenessPrompt.blink => 'Blink',
+    _LivenessPrompt.turnLeft => 'TurnLeft',
+    _LivenessPrompt.turnRight => 'TurnRight',
+    _LivenessPrompt.smile => 'Smile',
+  };
+}
+
 class _DriverLivenessScreenState extends ConsumerState<DriverLivenessScreen> {
+  static const _maxAttempts = 3;
+  static const _promptTimeout = Duration(seconds: 10);
+
+  final FaceDetector _faceDetector = FaceDetector(
+    options: FaceDetectorOptions(
+      enableClassification: true,
+      enableTracking: true,
+      performanceMode: FaceDetectorMode.accurate,
+      minFaceSize: 0.15,
+    ),
+  );
   CameraController? _camera;
   String? _message;
-  bool _loading = true;
-  int _remaining = 10;
-  Timer? _challengeTimer;
-  static const _challenges = [
-    'Blink twice',
-    'Turn your head left',
-    'Turn your head right',
-    'Smile briefly',
-  ];
-  String _challenge = '';
+  String? _challengeNonce;
+  DateTime? _challengeExpiresAt;
+  String? _challengeError;
+  List<_LivenessPrompt> _prompts = const [];
+  final Map<_LivenessPrompt, List<Map<String, double>>> _promptEvidence = {};
+  List<Map<String, double>> _currentPromptFrames = [];
+  int _promptIndex = 0;
+  int _attemptNumber = 1;
+  int _qualifyingFrames = 0;
+  bool _cameraLoading = true;
+  bool _challengeLoading = true;
+  bool _attemptActive = false;
+  bool _streamStarting = false;
+  bool _processingFrame = false;
+  bool _eyesWereClosed = false;
+  bool _submitting = false;
+  Timer? _promptTimer;
 
   @override
   void initState() {
     super.initState();
-    _restartChallenge();
+    _fetchChallenge();
     _initializeCamera();
   }
 
-  void _restartChallenge() {
-    _challengeTimer?.cancel();
+  Future<void> _fetchChallenge({bool startAttempt = true}) async {
     setState(() {
-      _challenge = _challenges[Random.secure().nextInt(_challenges.length)];
-      _remaining = 10;
+      _challengeLoading = true;
+      _challengeError = null;
+      _challengeNonce = null;
+      _challengeExpiresAt = null;
       _message = null;
     });
-    _challengeTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) return;
-      if (_remaining <= 1) {
-        timer.cancel();
-        setState(() {
-          _remaining = 0;
-          _message =
-              'Challenge time expired. Report the failed attempt or try again.';
-        });
-      } else {
-        setState(() => _remaining--);
-      }
-    });
-  }
-
-  Future<void> _reportFailure() async {
     try {
       final result = await ref
           .read(mobileApiProvider)
-          .postData('driver/liveness/report-failure');
-      if (!mounted) return;
-      final attempts = result['attemptsRemaining'];
-      final bannedUntil = result['bannedUntil'];
-      setState(
-        () => _message = bannedUntil != null
-            ? 'Retry is blocked until $bannedUntil. Contact Admin if this is an error.'
-            : 'Attempt recorded. ${attempts ?? ''} ${attempts == 1 ? 'attempt' : 'attempts'} remain.',
+          .getBareData('driver/liveness/challenge');
+      final nonce = result['nonce']?.toString();
+      final expiresAt = DateTime.tryParse(
+        result['expiresAt']?.toString() ?? '',
       );
+      final prompts = _parseServerPrompts(result['prompts']);
+      if (nonce == null ||
+          nonce.isEmpty ||
+          expiresAt == null ||
+          prompts == null) {
+        throw const ApiFailure(
+          message: 'The server returned an invalid liveness challenge.',
+        );
+      }
+      if (!mounted) return;
+      setState(() {
+        _challengeNonce = nonce;
+        _challengeExpiresAt = expiresAt.toUtc();
+        _prompts = prompts;
+        _promptIndex = 0;
+        _promptEvidence.clear();
+        _currentPromptFrames = [];
+        _challengeLoading = false;
+      });
+      if (startAttempt) await _maybeStartAttempt();
+    } on ApiFailure catch (failure) {
+      if (mounted) {
+        setState(() {
+          _challengeError = failure.message;
+          _challengeLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _challengeError = 'Could not load a liveness challenge. Try again.';
+          _challengeLoading = false;
+        });
+      }
+    }
+  }
+
+  List<_LivenessPrompt>? _parseServerPrompts(Object? value) {
+    if (value is! List) return null;
+    final prompts = <_LivenessPrompt>[];
+    for (final item in value) {
+      final prompt = switch (item?.toString()) {
+        'Blink' => _LivenessPrompt.blink,
+        'TurnLeft' => _LivenessPrompt.turnLeft,
+        'TurnRight' => _LivenessPrompt.turnRight,
+        'Smile' => _LivenessPrompt.smile,
+        _ => null,
+      };
+      if (prompt == null) return null;
+      prompts.add(prompt);
+    }
+    if (prompts.length != 3 || prompts.toSet().length != 3) return null;
+    return List.unmodifiable(prompts);
+  }
+
+  Future<void> _maybeStartAttempt() async {
+    final camera = _camera;
+    if (_attemptActive ||
+        _streamStarting ||
+        _challengeLoading ||
+        _challengeNonce == null ||
+        _attemptNumber > _maxAttempts ||
+        camera == null ||
+        !camera.value.isInitialized) {
+      return;
+    }
+    if (_challengeExpiresAt == null ||
+        !DateTime.now().toUtc().isBefore(_challengeExpiresAt!)) {
+      await _fetchChallenge();
+      return;
+    }
+
+    _streamStarting = true;
+    _attemptActive = true;
+    _startPromptTimer();
+    try {
+      await camera.startImageStream(_processCameraImage);
+    } catch (error) {
+      _attemptActive = false;
+      _promptTimer?.cancel();
+      if (mounted) {
+        setState(() {
+          _message = 'Could not start live face detection: $error';
+          _cameraLoading = false;
+        });
+      }
+    } finally {
+      _streamStarting = false;
+    }
+  }
+
+  void _startPromptTimer() {
+    _promptTimer?.cancel();
+    _qualifyingFrames = 0;
+    _eyesWereClosed = false;
+    _currentPromptFrames = [];
+    _promptTimer = Timer(_promptTimeout, () {
+      unawaited(
+        _finishAttempt(passed: false, reason: 'That prompt timed out.'),
+      );
+    });
+  }
+
+  Future<void> _processCameraImage(CameraImage cameraImage) async {
+    if (_processingFrame || !_attemptActive || _submitting) return;
+    _processingFrame = true;
+    try {
+      final inputImage = _inputImageFromCameraImage(cameraImage);
+      if (inputImage == null) {
+        throw StateError('This camera image format is not supported.');
+      }
+      final faces = await _faceDetector.processImage(inputImage);
+      if (!_attemptActive || !mounted) return;
+      if (faces.length != 1) {
+        _qualifyingFrames = 0;
+        _eyesWereClosed = false;
+        _currentPromptFrames = [];
+        return;
+      }
+      final face = faces.single;
+      final prompt = _prompts[_promptIndex];
+      final leftEye = face.leftEyeOpenProbability;
+      final rightEye = face.rightEyeOpenProbability;
+      final headYaw = face.headEulerAngleY;
+      final smile = face.smilingProbability;
+      Map<String, double>? frame;
+      var promptPassed = false;
+      switch (prompt) {
+        case _LivenessPrompt.blink:
+          if (leftEye == null || rightEye == null) {
+            _qualifyingFrames = 0;
+            return;
+          }
+          frame = {
+            'leftEyeOpenProbability': leftEye,
+            'rightEyeOpenProbability': rightEye,
+          };
+          if (leftEye < 0.3 && rightEye < 0.3) _eyesWereClosed = true;
+          promptPassed = _eyesWereClosed && leftEye > 0.7 && rightEye > 0.7;
+        case _LivenessPrompt.turnLeft:
+          if (headYaw == null) {
+            _qualifyingFrames = 0;
+            return;
+          }
+          frame = {'headEulerAngleY': headYaw};
+          promptPassed = headYaw < -20;
+        case _LivenessPrompt.turnRight:
+          if (headYaw == null) {
+            _qualifyingFrames = 0;
+            return;
+          }
+          frame = {'headEulerAngleY': headYaw};
+          promptPassed = headYaw > 20;
+        case _LivenessPrompt.smile:
+          if (smile == null) {
+            _qualifyingFrames = 0;
+            return;
+          }
+          frame = {'smilingProbability': smile};
+          promptPassed = smile > 0.75;
+      }
+      _currentPromptFrames.add(frame);
+      _qualifyingFrames = promptPassed ? _qualifyingFrames + 1 : 0;
+      if (_qualifyingFrames >= 2) _completePrompt();
+    } catch (error) {
+      await _finishAttempt(
+        passed: false,
+        reason: 'Live face detection failed: $error',
+      );
+    } finally {
+      _processingFrame = false;
+    }
+  }
+
+  InputImage? _inputImageFromCameraImage(CameraImage image) {
+    final camera = _camera;
+    if (camera == null || image.planes.isEmpty) return null;
+
+    final orientationDegrees = switch (camera.value.deviceOrientation) {
+      DeviceOrientation.portraitUp => 0,
+      DeviceOrientation.landscapeLeft => 90,
+      DeviceOrientation.portraitDown => 180,
+      DeviceOrientation.landscapeRight => 270,
+    };
+    final sensorOrientation = camera.description.sensorOrientation;
+    final rotationDegrees =
+        camera.description.lensDirection == CameraLensDirection.front
+        ? (sensorOrientation + orientationDegrees) % 360
+        : (sensorOrientation - orientationDegrees + 360) % 360;
+    final rotation = InputImageRotationValue.fromRawValue(rotationDegrees);
+    if (rotation == null) return null;
+
+    late final Uint8List bytes;
+    late final InputImageFormat format;
+    late final int bytesPerRow;
+    if (Platform.isAndroid) {
+      if (image.planes.length != 3) return null;
+      bytes = _yuv420ToNv21(image);
+      format = InputImageFormat.nv21;
+      bytesPerRow = image.width;
+    } else if (Platform.isIOS &&
+        image.format.group == ImageFormatGroup.bgra8888) {
+      final plane = image.planes.first;
+      bytes = plane.bytes;
+      format = InputImageFormat.bgra8888;
+      bytesPerRow = plane.bytesPerRow;
+    } else {
+      return null;
+    }
+
+    return InputImage.fromBytes(
+      bytes: bytes,
+      metadata: InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: rotation,
+        format: format,
+        bytesPerRow: bytesPerRow,
+      ),
+    );
+  }
+
+  Uint8List _yuv420ToNv21(CameraImage image) {
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+    final chromaWidth = (image.width + 1) ~/ 2;
+    final chromaHeight = (image.height + 1) ~/ 2;
+    final output = Uint8List(
+      image.width * image.height + 2 * chromaWidth * chromaHeight,
+    );
+    var offset = 0;
+
+    for (var row = 0; row < image.height; row++) {
+      for (var column = 0; column < image.width; column++) {
+        output[offset++] =
+            yPlane.bytes[row * yPlane.bytesPerRow +
+                column * (yPlane.bytesPerPixel ?? 1)];
+      }
+    }
+    for (var row = 0; row < chromaHeight; row++) {
+      for (var column = 0; column < chromaWidth; column++) {
+        final uIndex =
+            row * uPlane.bytesPerRow + column * (uPlane.bytesPerPixel ?? 1);
+        final vIndex =
+            row * vPlane.bytesPerRow + column * (vPlane.bytesPerPixel ?? 1);
+        output[offset++] = vPlane.bytes[vIndex];
+        output[offset++] = uPlane.bytes[uIndex];
+      }
+    }
+    return output;
+  }
+
+  void _completePrompt() {
+    _promptTimer?.cancel();
+    _promptEvidence[_prompts[_promptIndex]] = List.unmodifiable(
+      _currentPromptFrames,
+    );
+    _qualifyingFrames = 0;
+    _eyesWereClosed = false;
+    if (_promptIndex == _prompts.length - 1) {
+      unawaited(_finishAttempt(passed: true));
+      return;
+    }
+    setState(() => _promptIndex++);
+    _startPromptTimer();
+  }
+
+  Future<void> _finishAttempt({required bool passed, String? reason}) async {
+    if (!_attemptActive) return;
+    if (passed &&
+        (_challengeExpiresAt == null ||
+            !DateTime.now().toUtc().isBefore(_challengeExpiresAt!))) {
+      passed = false;
+      reason = 'The challenge expired before submission.';
+    }
+    _attemptActive = false;
+    _promptTimer?.cancel();
+    await _stopImageStream();
+    if (passed) {
+      await _submitLiveness();
+      return;
+    }
+
+    if (!mounted) return;
+    final hasRetry = _attemptNumber < _maxAttempts;
+    setState(() {
+      _message = hasRetry
+          ? '${reason ?? 'The live check did not pass'} Try again; ${_maxAttempts - _attemptNumber} retries remain.'
+          : '${reason ?? 'The live check did not pass'} Request a fresh challenge to try again.';
+      _attemptNumber++;
+    });
+    if (hasRetry) await _fetchChallenge();
+  }
+
+  Future<void> _stopImageStream() async {
+    final camera = _camera;
+    if (camera != null &&
+        camera.value.isInitialized &&
+        camera.value.isStreamingImages) {
+      await camera.stopImageStream();
+    }
+  }
+
+  Future<void> _retryAttempt() async {
+    if (_submitting) return;
+    if (_attemptNumber > _maxAttempts) _attemptNumber = 1;
+    setState(() => _message = null);
+    await _fetchChallenge();
+    if (!mounted) return;
+    if (_camera == null || !_camera!.value.isInitialized) {
+      await _initializeCamera();
+    }
+  }
+
+  Future<void> _submitLiveness() async {
+    final nonce = _challengeNonce;
+    final expiresAt = _challengeExpiresAt;
+    if (nonce == null || expiresAt == null) return;
+    if (!DateTime.now().toUtc().isBefore(expiresAt)) {
+      await _finishAttempt(
+        passed: false,
+        reason: 'The challenge expired before submission.',
+      );
+      return;
+    }
+
+    setState(() {
+      _submitting = true;
+      _message = null;
+    });
+    try {
+      await _stopImageStream();
+      final camera = _camera;
+      if (camera == null || !camera.value.isInitialized) {
+        throw const ApiFailure(message: 'The live camera is unavailable.');
+      }
+      final selfie = await camera.takePicture();
+      final selfieBase64 = base64Encode(await selfie.readAsBytes());
+      final result = await ref
+          .read(mobileApiProvider)
+          .postBareData(
+            'driver/liveness',
+            body: {
+              'nonce': nonce,
+              'selfieBase64': selfieBase64,
+              'promptResults': [
+                for (final prompt in _prompts)
+                  {
+                    'prompt': prompt.apiValue,
+                    'frames': _promptEvidence[prompt] ?? const [],
+                  },
+              ],
+            },
+          );
+      if (!mounted) return;
+      if (result['success'] == true && result['status'] == 'Approved') {
+        final accessToken = result['accessToken']?.toString();
+        if (accessToken == null || accessToken.isEmpty) {
+          throw const ApiFailure(
+            message: 'The server approved liveness without returning an access token.',
+          );
+        }
+        final apiClient = ref.read(apiClientProvider);
+        await apiClient.saveAccessToken(accessToken);
+        final session = ref.read(appSessionProvider);
+        if (session != null) {
+          final updatedSession = AuthSession(
+            accessToken: accessToken,
+            userId: session.userId,
+            email: session.email,
+            fullName: session.fullName,
+            role: session.role,
+            livenessPending: false,
+          );
+          ref.read(appSessionProvider.notifier).set(updatedSession);
+          await apiClient.saveSessionMetadata(
+            jsonEncode(updatedSession.toJson()),
+          );
+        }
+        if (mounted) context.go('/driver/car');
+        return;
+      }
+      setState(() {
+        _message =
+            result['message']?.toString() ??
+            'The server could not complete liveness verification.';
+      });
     } on ApiFailure catch (failure) {
       if (mounted) setState(() => _message = failure.message);
+    } catch (error) {
+      if (mounted) {
+        setState(
+          () => _message = 'Could not submit liveness verification: $error',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _submitting = false);
     }
   }
 
@@ -1110,7 +2096,7 @@ class _DriverLivenessScreenState extends ConsumerState<DriverLivenessScreen> {
       final cameras = await availableCameras();
       final camera = cameras.firstWhere(
         (item) => item.lensDirection == CameraLensDirection.front,
-        orElse: () => cameras.first,
+        orElse: () => throw StateError('A front-facing camera is required.'),
       );
       final controller = CameraController(
         camera,
@@ -1121,13 +2107,14 @@ class _DriverLivenessScreenState extends ConsumerState<DriverLivenessScreen> {
       if (!mounted) return;
       setState(() {
         _camera = controller;
-        _loading = false;
+        _cameraLoading = false;
       });
+      await _maybeStartAttempt();
     } catch (_) {
       if (mounted) {
         setState(() {
-          _message = 'Camera access is unavailable. Check app permissions.';
-          _loading = false;
+          _message = 'The front camera is unavailable. Check app permissions and try again.';
+          _cameraLoading = false;
         });
       }
     }
@@ -1135,8 +2122,10 @@ class _DriverLivenessScreenState extends ConsumerState<DriverLivenessScreen> {
 
   @override
   void dispose() {
-    _challengeTimer?.cancel();
-    _camera?.dispose();
+    _promptTimer?.cancel();
+    unawaited(_faceDetector.close());
+    final camera = _camera;
+    if (camera != null) unawaited(camera.dispose());
     super.dispose();
   }
 
@@ -1147,15 +2136,15 @@ class _DriverLivenessScreenState extends ConsumerState<DriverLivenessScreen> {
       padding: const EdgeInsets.all(20),
       children: [
         Text(
-          'Follow the challenge',
+          'Verify your identity',
           style: Theme.of(context).textTheme.headlineSmall,
         ),
         const SizedBox(height: 8),
         const Text(
-          'Your selfie is used for driver verification and is not sent until the verification model is configured.',
+          'Follow the server-selected live camera prompts. A selfie is captured only after the face checks pass.',
         ),
         const SizedBox(height: 18),
-        if (_loading)
+        if (_cameraLoading)
           const SizedBox(
             height: 280,
             child: LoadingPane(label: 'Opening camera'),
@@ -1170,10 +2159,9 @@ class _DriverLivenessScreenState extends ConsumerState<DriverLivenessScreen> {
           )
         else
           const NoticeStrip(
-            message: 'Camera preview is unavailable on this device.',
+            message: 'Camera access is unavailable. Check app permissions.',
             isError: true,
           ),
-        const SizedBox(height: 16),
         Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
@@ -1183,31 +2171,56 @@ class _DriverLivenessScreenState extends ConsumerState<DriverLivenessScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(_challenge, style: Theme.of(context).textTheme.titleLarge),
+              Text(
+                _challengeLoading
+                    ? 'Loading challenge'
+                    : _challengeNonce == null
+                    ? 'Challenge unavailable'
+                    : 'Attempt ${min(_attemptNumber, _maxAttempts)} of $_maxAttempts',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
               const SizedBox(height: 6),
-              Text('$_remaining seconds remaining'),
+              if (_attemptActive && _prompts.isNotEmpty)
+                Text(_prompts[_promptIndex].label),
+              if (_challengeExpiresAt != null)
+                Text('Expires ${_challengeExpiresAt!.toLocal().toString()}'),
             ],
           ),
         ),
+        if (_challengeError != null) ...[
+          const SizedBox(height: 12),
+          NoticeStrip(message: _challengeError!, isError: true),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _challengeLoading ? null : _retryAttempt,
+            icon: const Icon(Icons.refresh),
+            label: const Text('Retry live check'),
+          ),
+        ],
         if (_message != null) ...[
           const SizedBox(height: 12),
           NoticeStrip(message: _message!, isError: true),
         ],
-        const SizedBox(height: 18),
-        const NoticeStrip(
-          message: 'The face-api.js challenge model is not bundled in this project. Verification is intentionally unavailable rather than marking a selfie as a successful liveness check.',
-          isError: true,
-        ),
-        const SizedBox(height: 14),
-        FilledButton(onPressed: null, child: const Text('Verify identity')),
-        OutlinedButton(
-          onPressed: _reportFailure,
-          child: const Text('I could not complete the challenge'),
-        ),
-        TextButton(
-          onPressed: _restartChallenge,
-          child: const Text('Try another challenge'),
-        ),
+        if (_attemptActive) ...[
+          const SizedBox(height: 16),
+          LinearProgressIndicator(value: (_promptIndex + 1) / _prompts.length),
+          const SizedBox(height: 8),
+          Text(
+            'Keep your face centered and follow the prompt before the timer expires.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+        if (!_attemptActive &&
+            !_challengeLoading &&
+            _message != null &&
+            _challengeError == null) ...[
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: _challengeLoading ? null : _retryAttempt,
+            icon: const Icon(Icons.refresh),
+            label: const Text('Retry live check'),
+          ),
+        ],
         TextButton(
           onPressed: () async {
             await ref.read(apiClientProvider).clearSession();
