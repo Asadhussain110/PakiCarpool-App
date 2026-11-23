@@ -1,15 +1,48 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-const adminApiBaseUrl = String.fromEnvironment(
+const localBuild = bool.fromEnvironment('LOCAL_BUILD');
+const defaultAdminApiBaseUrl = String.fromEnvironment(
   'API_BASE_URL',
   defaultValue: 'https://api.pakicarpool.pk/api/v1',
 );
+const adminApiBaseUrlStorageKey = 'pakicarpool.apiBaseUrl';
+
+String adminApiBaseUrl = defaultAdminApiBaseUrl;
+
+String normalizeAdminApiBaseUrl(String value) {
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null ||
+      !uri.hasAuthority ||
+      !const {'http', 'https'}.contains(uri.scheme) ||
+      !uri.path.replaceAll(RegExp(r'/+$'), '').endsWith('/api/v1')) {
+    throw const FormatException(
+      'Use an HTTP or HTTPS server address ending in /api/v1.',
+    );
+  }
+  return uri.replace(path: uri.path.replaceAll(RegExp(r'/+$'), '')).toString();
+}
 
 final adminSessionProvider =
     NotifierProvider<AdminSessionController, AdminSession?>(
       AdminSessionController.new,
     );
+
+final adminExpiryNoticeProvider =
+    NotifierProvider<AdminExpiryNoticeController, bool?>(
+      AdminExpiryNoticeController.new,
+    );
+
+class AdminExpiryNoticeController extends Notifier<bool?> {
+  @override
+  bool? build() => null;
+
+  void set(bool actionFailed) => state ??= actionFailed;
+
+  void clear() => state = null;
+}
 
 class AdminSession {
   const AdminSession({
@@ -23,6 +56,23 @@ class AdminSession {
   final String userId;
   final String email;
   final String fullName;
+
+  DateTime? get expiresAt {
+    final segments = accessToken.split('.');
+    if (segments.length != 3) return null;
+    try {
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(segments[1]))),
+      );
+      if (payload is! Map || payload['exp'] is! num) return null;
+      return DateTime.fromMillisecondsSinceEpoch(
+        (payload['exp'] as num).toInt() * 1000,
+        isUtc: true,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 class AdminSessionController extends Notifier<AdminSession?> {
@@ -38,7 +88,10 @@ final adminApiProvider = Provider<AdminApi>(
   (ref) => AdminApi(
     baseUrl: adminApiBaseUrl,
     accessToken: () => ref.read(adminSessionProvider)?.accessToken,
-    onUnauthorized: () => ref.read(adminSessionProvider.notifier).clear(),
+    onUnauthorized: ({required actionFailed}) {
+      ref.read(adminExpiryNoticeProvider.notifier).set(actionFailed);
+      ref.read(adminSessionProvider.notifier).clear();
+    },
   ),
 );
 
@@ -59,19 +112,112 @@ class AdminApi {
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) {
+          if (_isAuthEndpoint(options.path)) {
+            handler.next(options);
+            return;
+          }
+
           final token = _accessToken();
-          if (token != null && token.isNotEmpty) {
-            options.headers['Authorization'] = 'Bearer $token';
+          if (_sessionBlocked || token == null || _isExpired(token)) {
+            expireSession(actionFailed: _isAction(options));
+            handler.reject(
+              DioException(
+                requestOptions: options,
+                type: DioExceptionType.cancel,
+                message: 'Your session has expired.',
+              ),
+            );
+            return;
+          }
+
+          options.headers['Authorization'] = 'Bearer $token';
+          options.cancelToken ??= _sessionCancelToken;
+          if (_isAction(options)) {
+            _inFlightActions++;
+            options.extra['adminActionTracked'] = true;
           }
           handler.next(options);
+        },
+        onResponse: (response, handler) {
+          _finishAction(response.requestOptions);
+          handler.next(response);
+        },
+        onError: (error, handler) {
+          _finishAction(error.requestOptions);
+          if (error.response?.statusCode == 401 &&
+              !_isAuthEndpoint(error.requestOptions.path) &&
+              _accessToken() != null) {
+            expireSession(actionFailed: _isAction(error.requestOptions));
+          }
+          handler.next(error);
         },
       ),
     );
   }
 
   final String? Function() _accessToken;
-  final void Function()? onUnauthorized;
+  final void Function({required bool actionFailed})? onUnauthorized;
   final Dio _dio;
+  CancelToken _sessionCancelToken = CancelToken();
+  bool _sessionBlocked = false;
+  int _inFlightActions = 0;
+
+  bool get hasInFlightActions => _inFlightActions > 0;
+
+  String get baseUrl => _dio.options.baseUrl;
+
+  void setBaseUrl(String value) {
+    final normalized = normalizeAdminApiBaseUrl(value);
+    _dio.options.baseUrl = normalized.endsWith('/')
+        ? normalized
+        : '$normalized/';
+    adminApiBaseUrl = _dio.options.baseUrl;
+  }
+
+  void resumeSession() {
+    _sessionBlocked = false;
+    if (_sessionCancelToken.isCancelled) _sessionCancelToken = CancelToken();
+  }
+
+  void expireSession({required bool actionFailed}) {
+    if (_sessionBlocked) return;
+    _sessionBlocked = true;
+    if (!_sessionCancelToken.isCancelled) {
+      _sessionCancelToken.cancel('The session has expired.');
+    }
+    onUnauthorized?.call(actionFailed: actionFailed);
+  }
+
+  bool _isAuthEndpoint(String path) {
+    final normalized = path.replaceFirst(RegExp(r'^/'), '');
+    return normalized.startsWith('auth/') && normalized != 'auth/logout';
+  }
+
+  bool _isAction(RequestOptions options) => options.method != 'GET';
+
+  bool _isExpired(String token) {
+    final segments = token.split('.');
+    if (segments.length != 3) return true;
+    try {
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(segments[1]))),
+      );
+      if (payload is! Map || payload['exp'] is! num) return true;
+      final expiresAt = DateTime.fromMillisecondsSinceEpoch(
+        (payload['exp'] as num).toInt() * 1000,
+        isUtc: true,
+      );
+      return !DateTime.now().toUtc().isBefore(expiresAt);
+    } catch (_) {
+      return true;
+    }
+  }
+
+  void _finishAction(RequestOptions options) {
+    if (options.extra.remove('adminActionTracked') == true) {
+      _inFlightActions--;
+    }
+  }
 
   Future<String> login({
     required String email,
@@ -126,10 +272,15 @@ class AdminApi {
     try {
       final response = await _dio.get<dynamic>(path, queryParameters: query);
       final envelope = _map(response.data);
-      final data = envelope['data'];
-      return data is List ? data.map(_map).toList() : const [];
+      final payload = envelope['data'];
+      final data = payload is List ? payload : _map(payload)['items'];
+      if (data is! List) {
+        throw const AdminApiError(
+          'The server returned an unexpected list response.',
+        );
+      }
+      return data.map(_map).toList();
     } on DioException catch (error) {
-      if (error.response?.statusCode == 401) onUnauthorized?.call();
       throw AdminApiError.fromDio(error);
     }
   }
@@ -161,7 +312,6 @@ class AdminApi {
       );
       return response.data ?? const [];
     } on DioException catch (error) {
-      if (error.response?.statusCode == 401) onUnauthorized?.call();
       throw AdminApiError.fromDio(error);
     }
   }
@@ -173,7 +323,6 @@ class AdminApi {
       final response = await request();
       return _map(_map(response.data)['data']);
     } on DioException catch (error) {
-      if (error.response?.statusCode == 401) onUnauthorized?.call();
       throw AdminApiError.fromDio(error);
     }
   }

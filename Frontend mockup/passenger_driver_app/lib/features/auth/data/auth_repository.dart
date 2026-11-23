@@ -30,7 +30,7 @@ abstract interface class AuthRepository {
 
   Future<void> resetPassword({
     required String email,
-    required String token,
+    required String code,
     required String newPassword,
   });
 
@@ -103,13 +103,13 @@ class ApiAuthRepository implements AuthRepository {
   @override
   Future<void> resetPassword({
     required String email,
-    required String token,
+    required String code,
     required String newPassword,
   }) async {
     await _send(
       () => _apiClient.post(
         'auth/reset-password',
-        data: {'email': email, 'token': token, 'newPassword': newPassword},
+        data: {'email': email, 'code': code, 'newPassword': newPassword},
       ),
     );
   }

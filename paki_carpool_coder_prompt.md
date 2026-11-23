@@ -25,7 +25,7 @@ There are three fixed user roles: **Passenger**, **Driver**, **Admin**. A user c
 | ORM | EF Core 8 Code First + Dapper (for complex queries) |
 | Authentication | ASP.NET Core Identity + JWT Bearer + Google OAuth 2.0 (PKCE) |
 | Real-time | SignalR (built into ASP.NET Core) |
-| Email | Brevo SMTP (MailKit library) |
+| Email | Direct SMTP with MailKit |
 | Maps (passenger) | flutter_map package + OpenStreetMap tiles (free, no API key) |
 | Navigation (driver) | Google Maps deep-link URL (no API key needed) |
 | Liveness Detection | face-api.js running inside Flutter WebView |
@@ -282,7 +282,7 @@ public class RideStop
     public double Latitude { get; set; }
     public double Longitude { get; set; }
     public int SequenceOrder { get; set; }        // 1-based, enforces travel order
-    public bool IsCompleted { get; set; }
+    public RideStopStatus Status { get; set; } = RideStopStatus.Upcoming;
     public DateTime? ArrivedAt { get; set; }
     public Ride Ride { get; set; }
 }
@@ -446,7 +446,7 @@ public enum FlagStatus { Open, Dismissed, ActionTaken }
 3. Hash password with BCrypt work factor 12
 4. Create User record with IsEmailVerified = false
 5. Generate 6-digit OTP, store hashed OTP + expiry (10 minutes) on User record
-6. Send OTP via Brevo SMTP (MailKit)
+6. Send OTP through the configured SMTP server using MailKit
 7. If role = Driver: create DriverProfile record
 8. If role = Passenger: create PassengerProfile record
 9. Return 201 with message "Check your email for verification code"
@@ -655,9 +655,9 @@ PUT /api/v1/driver/stops/{stopId}/arrive
 
 Actions:
 1. Validate stop belongs to driver's active ride and is next in sequence
-2. Set `RideStop.IsCompleted = true`, `ArrivedAt = now`
+2. Set `RideStop.Status = RideStopStatus.Completed`, `ArrivedAt = now`
 3. Find all passengers whose PickupStopId = this stop → send `DriverArrivedAtStop` SignalR event to each
-4. Find all future bookings for passengers who wanted to select this stop → those stops are now greyed out on passenger side (frontend reads IsCompleted from ride detail API)
+4. Find all future bookings for passengers who wanted to select this stop → those stops are now greyed out on passenger side (frontend reads Status from ride detail API)
 5. Generate new navigation deep-link to next stop:
    - Get driver's current GPS from DriverLocations table
    - Get next stop's Lat/Lng
@@ -968,11 +968,11 @@ Implement `NotificationService.cs` with three channels:
 
 **In-App (SignalR):** Send to user's personal group `user-{userId}`
 
-**Email (Brevo SMTP via MailKit):**
+**Email (direct SMTP via MailKit):**
 ```csharp
 var message = new MimeMessage();
-message.From.Add(new MailboxAddress("Paki Carpool", "noreply@pakicarpool.pk"));
-// Configure SmtpClient with Brevo SMTP credentials from environment variables
+message.From.Add(new MailboxAddress("Paki Carpool", smtpFrom));
+// Authenticate with SMTP_USER and SMTP_PASS and send over STARTTLS.
 ```
 
 **Phone notification:** Implement as in-app push simulation via SignalR for now (native push via FCM is out of scope v1 — but structure the NotificationService so FCM can be plugged in later without changing callers)
@@ -1192,18 +1192,18 @@ Repeat for `admin.pakicarpool.pk` pointing to a different port or path.
 ## ENVIRONMENT VARIABLES (never hardcode)
 
 ```env
-DATABASE_URL=Host=localhost;Port=5432;Database=pakicarpool;Username=...;Password=...
+DB_CONNECTION_STRING=Host=db.<ref>.supabase.co;Port=5432;Database=postgres;Username=postgres;Password=***;SSL Mode=Require;Trust Server Certificate=true
 JWT_SECRET=<256-bit random string>
 JWT_ISSUER=api.pakicarpool.pk
 JWT_AUDIENCE=pakicarpool-clients
 AES_ENCRYPTION_KEY=<256-bit random string>
 GOOGLE_CLIENT_ID=<from Google Cloud Console>
 GOOGLE_CLIENT_SECRET=<from Google Cloud Console>
-BREVO_SMTP_HOST=smtp-relay.brevo.com
-BREVO_SMTP_PORT=587
-BREVO_SMTP_USER=<brevo account email>
-BREVO_SMTP_PASS=<brevo SMTP key>
-FROM_EMAIL=noreply@pakicarpool.pk
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@gmail.com
+SMTP_PASS=your-app-password
+SMTP_FROM=you@gmail.com
 FILE_STORAGE_PATH=/var/pakicarpool/uploads
 ADMIN_DOMAIN=admin.pakicarpool.pk
 APP_DOMAIN=app.pakicarpool.pk

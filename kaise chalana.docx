@@ -1,0 +1,1 @@
+cd C:\photon && java -jar photon-1.3.0.jar -listen-ip 127.0.0.1 -listen-port 2322

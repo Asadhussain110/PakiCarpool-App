@@ -160,7 +160,7 @@ Top: route progress A->B->C, current stop, next-stop navigation. Map/route area 
 Per booking actions: I Am Here before pickup; End Ride after drop-off; Cash Received only after End Ride; Mark Passenger No-Show only after three-minute wait; Chat only for accepted/active booking.  
 Per stop actions: Arrived at [Stop], Navigate to [Next Stop]. On arrive, passed stops become unavailable, affected passengers are notified, and route navigation updates.  
 Location: request foreground/background location permission as needed; send `UpdateLocation(rideId, lat, lng)` over SignalR every five seconds while ride is active. Stop on completed/cancelled. Show permission, GPS unavailable, reconnect, and stale-location states.  
-API: `GET /api/v1/driver/rides/active`, booking list above, `PUT /api/v1/driver/stops/{stopId}/arrive`, per-booking `/iam-here`, `/end-ride`, `/cash-received`, `/no-show`; ride cancel is `DELETE /api/v1/driver/rides/{rideId}` with reason.
+API: `GET /api/v1/driver/rides/active`, booking list above, `PUT /api/v1/driver/stops/{stopId}/arrive`, per-booking `/driver-arrived`, `/end-ride`, `/cash-received`, `/no-show`; ride cancel is `DELETE /api/v1/driver/rides/{rideId}` with reason.
 
 ### D07. Cancel Ride
 
@@ -194,7 +194,7 @@ Actions: Block with required 10-500 character reason; Unblock with confirmation.
 
 Queue pending vehicles; display driver, make/model/year, seats, submission time, car photos, registration document, status. Separate liveness-failure queue/alert with selfie and manual verification.  
 Actions: Approve; Reject with reason (API requires 10-500 chars though FSD says optional); Manual Verify. Confirm actions and show result/notification state.  
-API: `GET /api/v1/admin/driver-approvals`, approve/reject routes under `/driver-approvals/{carId}`, `PUT /api/v1/admin/drivers/{driverId}/manual-verify`. Current upload/read access for stored files is not defined and is a blocking readiness gap.
+API: `GET /api/v1/admin/driver-approvals`, approve/reject routes under `/driver-approvals/{carId}`. Manual liveness approval is not available; drivers must complete a fresh server-verified challenge. Current upload/read access for stored files is not defined and is a blocking readiness gap.
 
 ### M05. Ride Management
 

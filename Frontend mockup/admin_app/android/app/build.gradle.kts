@@ -8,6 +8,16 @@ android {
     namespace = "pk.pakicarpool.pakicarpool_admin_app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
+    flavorDimensions += "environment"
+
+    productFlavors {
+        create("local") {
+            dimension = "environment"
+        }
+        create("production") {
+            dimension = "environment"
+        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

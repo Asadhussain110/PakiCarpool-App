@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../../../core/network/api_client.dart';
 import '../../../core/theme/route_atlas_theme.dart';
 
 class HCaptchaChallenge extends StatefulWidget {
@@ -21,7 +22,7 @@ class HCaptchaChallenge extends StatefulWidget {
 class _HCaptchaChallengeState extends State<HCaptchaChallenge> {
   late final WebViewController _controller;
 
-  static const apiOrigin = 'https://api.pakicarpool.pk';
+  String get apiOrigin => Uri.parse(apiBaseUrl).origin;
 
   bool get _supportsWebView =>
       defaultTargetPlatform == TargetPlatform.android ||

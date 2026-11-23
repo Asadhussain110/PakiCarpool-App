@@ -2,13 +2,22 @@ import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'admin_api.dart';
 import 'admin_screens.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (localBuild) {
+    const storage = FlutterSecureStorage();
+    final savedApiBaseUrl = await storage.read(key: adminApiBaseUrlStorageKey);
+    if (savedApiBaseUrl != null) {
+      adminApiBaseUrl = normalizeAdminApiBaseUrl(savedApiBaseUrl);
+    }
+  }
   runApp(const ProviderScope(child: PakiCarpoolAdminApp()));
 }
 
@@ -30,11 +39,24 @@ final adminRouterProvider = Provider<GoRouter>((ref) {
     routes: [
       GoRoute(
         path: '/login',
-        builder: (context, state) => const AdminLoginScreen(),
+        builder: (context, state) => AdminLoginScreen(
+          sessionExpired: state.uri.queryParameters['expired'] == '1',
+          actionFailed: state.uri.queryParameters['actionFailed'] == '1',
+        ),
       ),
       GoRoute(
         path: '/totp',
         builder: (context, state) => const AdminTotpScreen(),
+      ),
+      GoRoute(
+        path: '/forgot-password',
+        builder: (context, state) => const AdminForgotPasswordScreen(),
+      ),
+      GoRoute(
+        path: '/reset-password',
+        builder: (context, state) => AdminResetPasswordScreen(
+          email: state.uri.queryParameters['email'] ?? '',
+        ),
       ),
       GoRoute(
         path: '/admin',

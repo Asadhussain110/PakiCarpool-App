@@ -11,7 +11,7 @@ class RouteStopPoint {
     required this.sequence,
     required this.latitude,
     required this.longitude,
-    this.completed = false,
+    this.status = 'Upcoming',
     this.etaSeconds,
   });
 
@@ -20,8 +20,12 @@ class RouteStopPoint {
   final int sequence;
   final double latitude;
   final double longitude;
-  final bool completed;
+  final String status;
   final int? etaSeconds;
+
+  bool get completed => status.toLowerCase() == 'completed';
+  bool get active => status.toLowerCase() == 'active';
+  bool get upcoming => status.toLowerCase() == 'upcoming';
 
   LatLng get point => LatLng(latitude, longitude);
 
@@ -31,7 +35,7 @@ class RouteStopPoint {
     sequence: _asInt(json['sequenceOrder']),
     latitude: _asDouble(json['lat'] ?? json['latitude']),
     longitude: _asDouble(json['lng'] ?? json['longitude']),
-    completed: json['isCompleted'] == true,
+    status: json['status']?.toString() ?? 'Upcoming',
     etaSeconds: json['etaSeconds'] == null ? null : _asInt(json['etaSeconds']),
   );
 }

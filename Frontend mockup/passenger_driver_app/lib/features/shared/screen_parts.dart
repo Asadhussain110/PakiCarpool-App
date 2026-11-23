@@ -99,6 +99,96 @@ class StateLabel extends StatelessWidget {
   );
 }
 
+enum LifecycleStatusKind { booking, ride, flag }
+
+class LifecycleStatusSummary extends StatelessWidget {
+  const LifecycleStatusSummary({
+    required this.status,
+    required this.kind,
+    super.key,
+  });
+
+  final String status;
+  final LifecycleStatusKind kind;
+
+  @override
+  Widget build(BuildContext context) {
+    final normalized = status.toLowerCase();
+    final (description, color) = switch ((kind, normalized)) {
+      (LifecycleStatusKind.booking, 'pending') => (
+        'Waiting for the driver to respond.',
+        RouteAtlasColors.secondaryMuted,
+      ),
+      (LifecycleStatusKind.booking, 'accepted') => (
+        'Accepted; waiting for the ride to begin.',
+        RouteAtlasColors.teal,
+      ),
+      (LifecycleStatusKind.booking, 'active') => (
+        'Your ride is in progress.',
+        RouteAtlasColors.teal,
+      ),
+      (LifecycleStatusKind.booking, 'completed') => (
+        'This booking is complete.',
+        RouteAtlasColors.secondaryMuted,
+      ),
+      (LifecycleStatusKind.booking, 'rejected') => (
+        'The request was declined.',
+        RouteAtlasColors.coral,
+      ),
+      (LifecycleStatusKind.booking, 'cancelled') => (
+        'This booking was cancelled.',
+        RouteAtlasColors.secondaryMuted,
+      ),
+      (LifecycleStatusKind.ride, 'posted') => (
+        'Open for booking.',
+        RouteAtlasColors.teal,
+      ),
+      (LifecycleStatusKind.ride, 'active') => (
+        'The ride is underway.',
+        RouteAtlasColors.teal,
+      ),
+      (LifecycleStatusKind.ride, 'completed') => (
+        'This ride has finished.',
+        RouteAtlasColors.secondaryMuted,
+      ),
+      (LifecycleStatusKind.ride, 'cancelled') => (
+        'This ride was cancelled.',
+        RouteAtlasColors.coral,
+      ),
+      (LifecycleStatusKind.flag, 'open') => (
+        'Awaiting admin review.',
+        RouteAtlasColors.coral,
+      ),
+      (LifecycleStatusKind.flag, 'dismissed') => (
+        'Reviewed; no action was taken.',
+        RouteAtlasColors.secondaryMuted,
+      ),
+      (LifecycleStatusKind.flag, 'actiontaken') => (
+        'An action was recorded.',
+        RouteAtlasColors.teal,
+      ),
+      _ => ('Status: $status', RouteAtlasColors.secondaryMuted),
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Chip(
+          label: Text(status),
+          visualDensity: VisualDensity.compact,
+          side: BorderSide(color: color.withValues(alpha: 0.35)),
+          backgroundColor: color.withValues(alpha: 0.08),
+          labelStyle: TextStyle(color: color, fontWeight: FontWeight.w600),
+        ),
+        Text(
+          description,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: color),
+        ),
+      ],
+    );
+  }
+}
+
 Future<String?> askForText(
   BuildContext context, {
   required String title,

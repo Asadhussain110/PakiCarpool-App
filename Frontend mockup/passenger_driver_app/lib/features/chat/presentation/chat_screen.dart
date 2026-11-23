@@ -37,6 +37,7 @@ class _BookingChatScreenState extends ConsumerState<BookingChatScreen> {
   bool _sending = false;
   HubConnectionState? _connectionState;
   String? _error;
+  String? _historyError;
 
   @override
   void initState() {
@@ -46,6 +47,12 @@ class _BookingChatScreenState extends ConsumerState<BookingChatScreen> {
   }
 
   Future<void> _loadHistory() async {
+    if (!_loading && mounted) {
+      setState(() {
+        _loading = true;
+        _historyError = null;
+      });
+    }
     try {
       final data = await ref
           .read(mobileApiProvider)
@@ -57,12 +64,13 @@ class _BookingChatScreenState extends ConsumerState<BookingChatScreen> {
           ..clear()
           ..addAll(messages is List ? messages.map(asMap) : const []);
         _loading = false;
+        _historyError = null;
       });
       _scrollToLatest();
     } on ApiFailure catch (failure) {
       if (mounted) {
         setState(() {
-          _error = failure.message;
+          _historyError = failure.message;
           _loading = false;
         });
       }
@@ -232,7 +240,28 @@ class _BookingChatScreenState extends ConsumerState<BookingChatScreen> {
           Expanded(
             child: _loading
                 ? const LoadingPane(label: 'Loading chat history')
-                : ListView.builder(
+                  : _historyError != null
+                  ? ErrorPane(
+                      message: _historyError!,
+                      onRetry: _loadHistory,
+                    )
+                  : _messages.isEmpty
+                  ? const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.forum_outlined, size: 42),
+                            SizedBox(height: 12),
+                            Text('No messages yet.'),
+                            SizedBox(height: 4),
+                            Text('Start the conversation with your ride partner.'),
+                          ],
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
                     controller: _scrollController,
                     padding: const EdgeInsets.fromLTRB(14, 18, 14, 18),
                     itemCount: _messages.length,

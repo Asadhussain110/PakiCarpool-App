@@ -1,0 +1,2 @@
+#include "Release.xcconfig"
+INFOPLIST_FILE = Runner/Info-Local.plist

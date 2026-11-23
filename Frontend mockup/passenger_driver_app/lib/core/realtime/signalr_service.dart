@@ -11,15 +11,45 @@ final signalRServiceProvider = Provider<SignalRService>((ref) {
   return service;
 });
 
+final notificationInboxProvider =
+    NotifierProvider<NotificationInboxController, List<Map<String, dynamic>>>(
+      NotificationInboxController.new,
+    );
+
+class NotificationInboxController
+    extends Notifier<List<Map<String, dynamic>>> {
+  @override
+  List<Map<String, dynamic>> build() => const [];
+
+  void add(Map<String, dynamic> notification) {
+    state = List.unmodifiable([
+      ...state,
+      {
+        ...notification,
+        'receivedAt': DateTime.now().toUtc().toIso8601String(),
+      },
+    ].skip(state.length >= 100 ? state.length - 99 : 0));
+  }
+
+  void clear() => state = const [];
+}
+
 class SignalRService {
-  SignalRService(this._apiClient);
+  SignalRService(this._apiClient) {
+    on('ReceiveNotification', _handleNotification);
+    on('ReceivePushNotification', _handleNotification);
+  }
 
   final ApiClient _apiClient;
   HubConnection? _connection;
   final Map<String, List<void Function(List<Object?>?)>> _handlers = {};
   final _stateController = StreamController<HubConnectionState>.broadcast();
+  final _notificationController =
+      StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<HubConnectionState> get states => _stateController.stream;
+  Stream<Map<String, dynamic>> get notifications =>
+      _notificationController.stream;
   HubConnectionState? get state => _connection?.state;
 
   Future<void> connect() async {
@@ -32,7 +62,7 @@ class SignalRService {
       accessTokenFactory: () async =>
           await _apiClient.getValidAccessToken() ?? '',
     );
-    final hubUrl = apiBaseUrl
+    final hubUrl = _apiClient.baseUrl
         .replaceFirst('/api/v1', '/hubs/pakicarpool')
         .replaceAll(RegExp(r'/+$'), '');
     final connection = HubConnectionBuilder()
@@ -50,18 +80,32 @@ class SignalRService {
       }
     });
     _connection = connection;
-    await connection.start();
-    _emitState();
     for (final entry in _handlers.entries) {
       for (final handler in entry.value) {
         connection.on(entry.key, handler);
       }
     }
+    await connection.start();
+    _emitState();
   }
 
   void on(String event, void Function(List<Object?>?) handler) {
     _handlers.putIfAbsent(event, () => []).add(handler);
     _connection?.on(event, handler);
+  }
+
+  void _handleNotification(List<Object?>? args) {
+    if (args == null || args.isEmpty || _notificationController.isClosed) {
+      return;
+    }
+    final payload = args.first;
+    if (payload is Map) {
+      _notificationController.add(
+        payload.map<String, dynamic>(
+          (key, value) => MapEntry(key.toString(), value),
+        ),
+      );
+    }
   }
 
   Future<void> joinRide(String rideId) async {
@@ -77,10 +121,32 @@ class SignalRService {
     );
   }
 
+  Future<void> leavePassengerRide(String rideId, String passengerId) async {
+    final connection = _connection;
+    if (connection?.state == HubConnectionState.Connected) {
+      await connection!.invoke(
+        'LeavePassengerRideGroup',
+        args: [rideId, passengerId],
+      );
+    }
+  }
+
   Future<void> leaveRide(String rideId) async {
     final connection = _connection;
     if (connection?.state == HubConnectionState.Connected) {
       await connection!.invoke('LeaveRideGroup', args: [rideId]);
+    }
+  }
+
+  Future<void> stop() async {
+    final connection = _connection;
+    if (connection == null) return;
+    try {
+      if (connection.state != HubConnectionState.Disconnected) {
+        await connection.stop();
+      }
+    } finally {
+      if (identical(_connection, connection)) _connection = null;
     }
   }
 
@@ -115,11 +181,22 @@ class SignalRService {
   }
 
   Future<void> dispose() async {
-    final connection = _connection;
-    _connection = null;
-    if (connection?.state == HubConnectionState.Connected) {
-      await connection!.stop();
-    }
+    await stop();
     await _stateController.close();
+    await _notificationController.close();
   }
+}
+
+String notificationDisplayMessage(Map<String, dynamic> notification) {
+  final message = notification['message']?.toString().trim();
+  if (message?.isNotEmpty == true) return message!;
+
+  final title = notification['title']?.toString().trim();
+  return switch (notification['type']?.toString()) {
+    'RideCancelledByDriver' => 'The ride was cancelled by the driver.',
+    'BookingAccepted' => 'Your booking was accepted.',
+    'BookingRejected' => 'Your booking was rejected.',
+    'DriverArrivedAtStop' => 'Your driver arrived at a stop.',
+    _ => title?.isNotEmpty == true ? title! : 'You have a new notification.',
+  };
 }

@@ -2,12 +2,15 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../../../core/network/api_client.dart';
 import '../../../core/network/mobile_api.dart';
 import '../../../core/realtime/signalr_service.dart';
+import '../../../core/theme/route_atlas_theme.dart';
+import '../../auth/models/app_session.dart';
 import '../../shared/route_map.dart';
 import '../../shared/screen_parts.dart';
 
@@ -21,18 +24,89 @@ class PassengerRideListScreen extends ConsumerStatefulWidget {
 
 class _PassengerRideListScreenState
     extends ConsumerState<PassengerRideListScreen> {
+  static const _radiusStorageKey = 'rideSearchRadius';
+
   final List<Map<String, dynamic>> _rides = [];
+  final ScrollController _scrollController = ScrollController();
+  final _startController = TextEditingController();
+  final _endController = TextEditingController();
   Map<String, dynamic>? _activeBooking;
+  Map<String, dynamic>? _selectedStart;
+  Map<String, dynamic>? _selectedEnd;
+  Map<String, dynamic>? _searchConfig;
+  List<Map<String, dynamic>> _startSuggestions = [];
+  List<Map<String, dynamic>> _endSuggestions = [];
+  List<Map<String, dynamic>> _searchResults = [];
+  Timer? _startDebounce;
+  Timer? _endDebounce;
+  double? _radius;
   int _page = 1;
   int _totalPages = 1;
   bool _loading = true;
   bool _loadingMore = false;
+  bool _loadingStartSuggestions = false;
+  bool _loadingEndSuggestions = false;
+  bool _startNoSuggestions = false;
+  bool _endNoSuggestions = false;
+  bool _usingCurrentLocation = false;
+  bool _searching = false;
+  bool _hasSearched = false;
   String? _error;
+  String? _searchError;
+  String? _placesError;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onRidesScroll);
     _load();
+    _loadSearchConfig();
+  }
+
+  @override
+  void dispose() {
+    _startDebounce?.cancel();
+    _endDebounce?.cancel();
+    _scrollController.dispose();
+    _startController.dispose();
+    _endController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadSearchConfig() async {
+    try {
+      final config = await ref
+          .read(mobileApiProvider)
+          .getData('rides/search/config');
+      final minimum = asDouble(config['minRadiusMeters']);
+      final maximum = asDouble(config['maxRadiusMeters']);
+      final defaultRadius = asDouble(config['defaultRadiusMeters']);
+      if (minimum <= 0 ||
+          maximum < minimum ||
+          defaultRadius < minimum ||
+          defaultRadius > maximum) {
+        throw StateError('Ride search configuration is invalid.');
+      }
+
+      final storedRadius = await ref
+          .read(secureStorageProvider)
+          .read(key: _radiusStorageKey);
+      final parsedRadius = double.tryParse(storedRadius ?? '');
+      final radius = (parsedRadius ?? defaultRadius)
+          .clamp(minimum, maximum)
+          .toDouble();
+      if (!mounted) return;
+      setState(() {
+        _searchConfig = config;
+        _radius = radius;
+      });
+    } on ApiFailure catch (failure) {
+      if (mounted) setState(() => _searchError = failure.message);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _searchError = 'Search settings could not be loaded.');
+      }
+    }
   }
 
   Future<void> _load({bool append = false}) async {
@@ -89,6 +163,18 @@ class _PassengerRideListScreenState
     }
   }
 
+  void _onRidesScroll() {
+    if (!_scrollController.hasClients ||
+        _loading ||
+        _loadingMore ||
+        _page >= _totalPages) {
+      return;
+    }
+    if (_scrollController.position.extentAfter <= 200) {
+      unawaited(_load(append: true));
+    }
+  }
+
   Future<Map<String, dynamic>?> _loadActive(MobileApi api) async {
     try {
       return await api.getData('passenger/bookings/active');
@@ -97,13 +183,269 @@ class _PassengerRideListScreenState
     }
   }
 
+  Future<void> _refreshAll() async {
+    await Future.wait([_load(), _loadSearchConfig()]);
+  }
+
+  void _onStartChanged(String value) {
+    _startDebounce?.cancel();
+    setState(() {
+      _selectedStart = null;
+      _startSuggestions = [];
+      _loadingStartSuggestions = false;
+      _startNoSuggestions = false;
+      _placesError = null;
+    });
+    _scheduleAutocomplete(value, isStart: true);
+  }
+
+  void _onEndChanged(String value) {
+    _endDebounce?.cancel();
+    setState(() {
+      _selectedEnd = null;
+      _endSuggestions = [];
+      _loadingEndSuggestions = false;
+      _endNoSuggestions = false;
+      _placesError = null;
+    });
+    _scheduleAutocomplete(value, isStart: false);
+  }
+
+  void _scheduleAutocomplete(String value, {required bool isStart}) {
+    final query = value.trim();
+    if (query.isEmpty) return;
+    final timer = Timer(
+      const Duration(milliseconds: 300),
+      () => _loadSuggestions(query, isStart: isStart),
+    );
+    if (isStart) {
+      _startDebounce = timer;
+    } else {
+      _endDebounce = timer;
+    }
+  }
+
+  Future<void> _loadSuggestions(String query, {required bool isStart}) async {
+    if (!mounted) return;
+    setState(() {
+      if (isStart) {
+        _loadingStartSuggestions = true;
+      } else {
+        _loadingEndSuggestions = true;
+      }
+      _placesError = null;
+    });
+
+    List<Map<String, dynamic>> suggestions = [];
+    String? error;
+    try {
+      suggestions = await ref
+          .read(mobileApiProvider)
+          .getListData(
+            'places/autocomplete',
+            query: {
+              'q': query,
+              'lang': Localizations.localeOf(context).languageCode,
+            },
+          );
+    } on ApiFailure catch (failure) {
+      error = failure.statusCode == 503
+          ? 'Place search is unavailable. Start Photon on the dev PC, use your current location for pickup, or retry this search later.'
+          : failure.message;
+    } catch (_) {
+      error = 'Place suggestions could not be loaded. Try again.';
+    }
+
+    if (!mounted) return;
+    final controller = isStart ? _startController : _endController;
+    if (controller.text.trim() != query) return;
+    setState(() {
+      if (isStart) {
+        _loadingStartSuggestions = false;
+        _startSuggestions = suggestions;
+        _startNoSuggestions = error == null && suggestions.isEmpty;
+      } else {
+        _loadingEndSuggestions = false;
+        _endSuggestions = suggestions;
+        _endNoSuggestions = error == null && suggestions.isEmpty;
+      }
+      _placesError = error;
+    });
+  }
+
+  Future<void> _useCurrentLocation() async {
+    if (_usingCurrentLocation) return;
+    _startDebounce?.cancel();
+    setState(() {
+      _usingCurrentLocation = true;
+      _loadingStartSuggestions = false;
+      _startSuggestions = [];
+      _startNoSuggestions = false;
+      _placesError = null;
+    });
+
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        if (mounted) {
+          setState(
+            () => _placesError = 'Turn on location services to continue.',
+          );
+        }
+        return;
+      }
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          setState(
+            () => _placesError =
+                'Allow location access to use your current location.',
+          );
+        }
+        return;
+      }
+
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      );
+      final place = await ref
+          .read(mobileApiProvider)
+          .getData(
+            'places/reverse',
+            query: {'lat': position.latitude, 'lon': position.longitude},
+          );
+      final latitude = place['latitude'];
+      final longitude = place['longitude'];
+      final displayName = (place['displayName'] ?? place['name'] ?? '')
+          .toString()
+          .trim();
+      if (latitude is! num || longitude is! num || displayName.isEmpty) {
+        throw StateError('No address was found for your location.');
+      }
+
+      final selectedPlace = {
+        ...place,
+        'displayName': displayName,
+        'latitude': latitude.toDouble(),
+        'longitude': longitude.toDouble(),
+      };
+      if (!mounted) return;
+      _startController.value = TextEditingValue(
+        text: displayName,
+        selection: TextSelection.collapsed(offset: displayName.length),
+      );
+      setState(() {
+        _selectedStart = selectedPlace;
+        _startSuggestions = [];
+        _startNoSuggestions = false;
+        _placesError = null;
+      });
+    } on ApiFailure catch (failure) {
+      if (mounted) setState(() => _placesError = failure.message);
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _placesError =
+              'Your location could not be resolved. Enter an address instead.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _usingCurrentLocation = false);
+    }
+  }
+
+  void _selectPlace(Map<String, dynamic> place, {required bool isStart}) {
+    final controller = isStart ? _startController : _endController;
+    final displayName = (place['displayName'] ?? place['name'] ?? '')
+        .toString();
+    controller.value = TextEditingValue(
+      text: displayName,
+      selection: TextSelection.collapsed(offset: displayName.length),
+    );
+    setState(() {
+      if (isStart) {
+        _selectedStart = place;
+        _startSuggestions = [];
+      } else {
+        _selectedEnd = place;
+        _endSuggestions = [];
+      }
+      _placesError = null;
+    });
+  }
+
+  void _changeRadius(double value) {
+    final radius = value.roundToDouble();
+    setState(() => _radius = radius);
+    unawaited(_saveRadius(radius));
+  }
+
+  Future<void> _saveRadius(double radius) async {
+    try {
+      await ref
+          .read(secureStorageProvider)
+          .write(key: _radiusStorageKey, value: radius.toStringAsFixed(0));
+    } catch (_) {
+      if (mounted) {
+        setState(() => _searchError = 'Search radius could not be saved.');
+      }
+    }
+  }
+
+  Future<void> _searchByRoute() async {
+    final start = _selectedStart;
+    final end = _selectedEnd;
+    final radius = _radius;
+    if (start == null || end == null || radius == null) {
+      setState(
+        () => _searchError = 'Choose both addresses from the suggestions.',
+      );
+      return;
+    }
+
+    setState(() {
+      _searching = true;
+      _hasSearched = true;
+      _searchError = null;
+    });
+    try {
+      final results = await ref
+          .read(mobileApiProvider)
+          .getListData(
+            'rides/search',
+            query: {
+              'startLatitude': asDouble(start['latitude']),
+              'startLongitude': asDouble(start['longitude']),
+              'endLatitude': asDouble(end['latitude']),
+              'endLongitude': asDouble(end['longitude']),
+              'radiusMeters': radius,
+            },
+          );
+      if (!mounted) return;
+      setState(() => _searchResults = results);
+    } on ApiFailure catch (failure) {
+      if (mounted) setState(() => _searchError = failure.message);
+    } finally {
+      if (mounted) setState(() => _searching = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const LoadingPane(label: 'Finding rides');
     if (_error != null) return ErrorPane(message: _error!, onRetry: _load);
+    final searchConfig = _searchConfig;
+    final radius = _radius;
     return RefreshIndicator(
-      onRefresh: _load,
+      onRefresh: _refreshAll,
       child: ListView(
+        controller: _scrollController,
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
         children: [
           Text(
@@ -112,6 +454,74 @@ class _PassengerRideListScreenState
           ),
           const SizedBox(height: 5),
           const Text('Choose a ride that follows your part of the way.'),
+          const SizedBox(height: 18),
+          _PlaceAutocompleteInput(
+            controller: _startController,
+            label: 'Where are you getting picked up?',
+            icon: Icons.trip_origin,
+            suggestions: _startSuggestions,
+            loading: _loadingStartSuggestions,
+            noResults: _startNoSuggestions,
+            onUseCurrentLocation: _useCurrentLocation,
+            usingCurrentLocation: _usingCurrentLocation,
+            onChanged: _onStartChanged,
+            onSelected: (place) => _selectPlace(place, isStart: true),
+          ),
+          const SizedBox(height: 12),
+          _PlaceAutocompleteInput(
+            controller: _endController,
+            label: 'Where are you going?',
+            icon: Icons.place_outlined,
+            suggestions: _endSuggestions,
+            loading: _loadingEndSuggestions,
+            noResults: _endNoSuggestions,
+            onChanged: _onEndChanged,
+            onSelected: (place) => _selectPlace(place, isStart: false),
+          ),
+          if (_placesError != null) ...[
+            const SizedBox(height: 10),
+            NoticeStrip(message: _placesError!, isError: true),
+          ],
+          if (searchConfig != null && radius != null) ...[
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Search radius',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                Text('${radius.round()}m'),
+              ],
+            ),
+            Slider(
+              min: asDouble(searchConfig['minRadiusMeters']),
+              max: asDouble(searchConfig['maxRadiusMeters']),
+              value: radius,
+              onChanged: _changeRadius,
+            ),
+          ] else ...[
+            const SizedBox(height: 14),
+            const LinearProgressIndicator(),
+          ],
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: _searching || searchConfig == null
+                ? null
+                : _searchByRoute,
+            icon: _searching
+                ? const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.search),
+            label: const Text('Search rides'),
+          ),
+          if (_searchError != null) ...[
+            const SizedBox(height: 10),
+            NoticeStrip(message: _searchError!, isError: true),
+          ],
           if (_activeBooking != null) ...[
             const SizedBox(height: 18),
             Material(
@@ -129,7 +539,25 @@ class _PassengerRideListScreenState
             ),
           ],
           const SizedBox(height: 20),
-          if (_rides.isEmpty)
+          if (_hasSearched) ...[
+            Text(
+              'Matching rides',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 6),
+            if (_searching) const LinearProgressIndicator(),
+            if (!_searching && _searchResults.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 28),
+                child: Text('No rides match this route and radius.'),
+              ),
+            for (final result in _searchResults)
+              _RideSearchResultCard(
+                result: result,
+                onTap: () =>
+                    context.push('/passenger/ride/${result['rideId']}'),
+              ),
+          ] else if (_rides.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 64),
               child: Column(
@@ -150,26 +578,254 @@ class _PassengerRideListScreenState
               ),
               const Divider(height: 1),
             ],
-          if (_page < _totalPages)
+          if (_loadingMore)
             Padding(
-              padding: const EdgeInsets.only(top: 18),
-              child: OutlinedButton(
-                onPressed: _loadingMore ? null : () => _load(append: true),
-                child: _loadingMore
-                    ? const SizedBox.square(
-                        dimension: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('Load more rides'),
+              padding: const EdgeInsets.symmetric(vertical: 18),
+              child: const Center(
+                child: SizedBox.square(
+                  dimension: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
               ),
             ),
           const SizedBox(height: 12),
-          Text(
-            'Routes and stop order come from driver posts. Segment availability is confirmed when you request a seat.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
+          if (!_hasSearched)
+            Text(
+              'Routes and stop order come from driver posts. Segment availability is confirmed when you request a seat.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
         ],
       ),
+    );
+  }
+}
+
+class _PlaceAutocompleteInput extends StatelessWidget {
+  const _PlaceAutocompleteInput({
+    required this.controller,
+    required this.label,
+    required this.icon,
+    required this.suggestions,
+    required this.loading,
+    required this.noResults,
+    this.onUseCurrentLocation,
+    this.usingCurrentLocation = false,
+    required this.onChanged,
+    required this.onSelected,
+  });
+
+  final TextEditingController controller;
+  final String label;
+  final IconData icon;
+  final List<Map<String, dynamic>> suggestions;
+  final bool loading;
+  final bool noResults;
+  final VoidCallback? onUseCurrentLocation;
+  final bool usingCurrentLocation;
+  final ValueChanged<String> onChanged;
+  final ValueChanged<Map<String, dynamic>> onSelected;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      TextField(
+        controller: controller,
+        enabled: !usingCurrentLocation,
+        onChanged: onChanged,
+        textInputAction: TextInputAction.search,
+        decoration: InputDecoration(
+          labelText: label,
+          prefixIcon: Icon(icon),
+          suffixIcon: onUseCurrentLocation == null
+              ? null
+              : IconButton(
+                  tooltip: 'Use current location',
+                  onPressed: usingCurrentLocation ? null : onUseCurrentLocation,
+                  icon: usingCurrentLocation
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.my_location),
+                ),
+        ),
+      ),
+      if (loading) const LinearProgressIndicator(minHeight: 2),
+      if (suggestions.isNotEmpty || noResults)
+        Container(
+          margin: const EdgeInsets.only(top: 4),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            border: Border.all(color: RouteAtlasColors.outline),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (noResults)
+                const ListTile(
+                  enabled: false,
+                  title: Text('No places found. Try another search.'),
+                ),
+              for (var index = 0; index < suggestions.length; index++) ...[
+                ListTile(
+                  leading: const Icon(
+                    Icons.location_on_outlined,
+                    color: RouteAtlasColors.teal,
+                  ),
+                  title: Text(
+                    (suggestions[index]['displayName'] ??
+                            suggestions[index]['name'] ??
+                            '')
+                        .toString(),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: () => onSelected(suggestions[index]),
+                ),
+                if (index < suggestions.length - 1)
+                  const Divider(height: 1, indent: 56),
+              ],
+            ],
+          ),
+        ),
+    ],
+  );
+}
+
+class _RideSearchResultCard extends StatelessWidget {
+  const _RideSearchResultCard({required this.result, required this.onTap});
+
+  final Map<String, dynamic> result;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final start = asMap(result['startStop']);
+    final end = asMap(result['endStop']);
+    final photoUrl = (result['driverPhotoUrl'] ?? '').toString();
+    final departure = DateTime.tryParse('${result['departurTime']}')?.toLocal();
+    final departureLabel = departure == null
+        ? 'Departure time unavailable'
+        : '${MaterialLocalizations.of(context).formatMediumDate(departure)} · '
+              '${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(departure))}';
+    final availableSeats = asInt(result['availableSeats']);
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      color: Theme.of(context).colorScheme.surface,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: const BorderSide(color: RouteAtlasColors.outline),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  SizedBox.square(
+                    dimension: 48,
+                    child: ClipOval(
+                      child: photoUrl.isEmpty
+                          ? const ColoredBox(
+                              color: RouteAtlasColors.tealSurface,
+                              child: Icon(Icons.person_outline),
+                            )
+                          : Image.network(
+                              photoUrl,
+                              fit: BoxFit.cover,
+                              errorBuilder: (context, error, stackTrace) =>
+                                  const ColoredBox(
+                                    color: RouteAtlasColors.tealSurface,
+                                    child: Icon(Icons.person_outline),
+                                  ),
+                            ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      (result['driverName'] ?? 'Driver').toString(),
+                      style: Theme.of(context).textTheme.titleMedium,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  Text(
+                    '$availableSeats ${availableSeats == 1 ? 'seat' : 'seats'}',
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: RouteAtlasColors.teal,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              _StopMatchLine(label: 'Pickup', stop: start),
+              const SizedBox(height: 5),
+              _StopMatchLine(label: 'Drop-off', stop: end),
+              const SizedBox(height: 10),
+              Text(
+                departureLabel,
+                style: Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(color: RouteAtlasColors.muted),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StopMatchLine extends StatelessWidget {
+  const _StopMatchLine({required this.label, required this.stop});
+
+  final String label;
+  final Map<String, dynamic> stop;
+
+  @override
+  Widget build(BuildContext context) {
+    final perfect = stop['isPerfectMatch'] == true;
+    final distance = stop['distanceMeters'];
+    final distanceLabel = !perfect && distance is num
+        ? '${distance.round()}m away'
+        : null;
+
+    return Row(
+      children: [
+        SizedBox(
+          width: 66,
+          child: Text(
+            label,
+            style: Theme.of(context).textTheme.bodySmall
+                ?.copyWith(color: RouteAtlasColors.secondaryMuted),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            (stop['stopName'] ?? '').toString(),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+        ),
+        if (distanceLabel != null) ...[
+          const SizedBox(width: 8),
+          Text(
+            distanceLabel,
+            style: Theme.of(context).textTheme.bodySmall
+                ?.copyWith(color: RouteAtlasColors.muted),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -226,7 +882,10 @@ class _RideListItem extends StatelessWidget {
             const SizedBox(height: 7),
             Row(
               children: [
-                StateLabel((ride['status'] ?? 'Posted').toString()),
+                LifecycleStatusSummary(
+                  status: (ride['status'] ?? 'Posted').toString(),
+                  kind: LifecycleStatusKind.ride,
+                ),
                 const Spacer(),
                 const Text('View route'),
                 const SizedBox(width: 2),
@@ -326,7 +985,7 @@ class _PassengerRideDetailScreenState
     }
     final ride = _ride ?? const <String, dynamic>{};
     final stops = _stops(ride);
-    final futureStops = stops.where((stop) => !stop.completed).toList();
+    final futureStops = stops.where((stop) => stop.upcoming).toList();
     final pickup = futureStops
         .where((stop) => stop.id == _pickupId)
         .firstOrNull;
@@ -396,7 +1055,7 @@ class _PassengerRideDetailScreenState
           ),
           const SizedBox(height: 10),
           const Text(
-            'Passed stops are unavailable. Segment capacity is checked by the server when you request.',
+            'Stops already en route or completed are unavailable. Segment capacity is checked by the server when you request.',
             style: TextStyle(color: Color(0xFF44585D)),
           ),
           if (_error != null) ...[
@@ -422,7 +1081,9 @@ class _PassengerRideDetailScreenState
 }
 
 class ActiveBookingScreen extends ConsumerStatefulWidget {
-  const ActiveBookingScreen({super.key});
+  const ActiveBookingScreen({this.onBrowseRides, super.key});
+
+  final VoidCallback? onBrowseRides;
 
   @override
   ConsumerState<ActiveBookingScreen> createState() =>
@@ -434,8 +1095,11 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
   Map<String, dynamic>? _ride;
   LatLng? _driverLocation;
   String? _error;
+  String? _realtimeError;
   String? _eventNotice;
+  bool _noActiveBooking = false;
   Timer? _refreshTimer;
+  StreamSubscription<Map<String, dynamic>>? _notificationSubscription;
   bool _loading = true;
 
   @override
@@ -451,12 +1115,54 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
 
   Future<void> _listenRealtime() async {
     final realtime = ref.read(signalRServiceProvider);
+    _notificationSubscription = realtime.notifications.listen((notification) {
+      if (!mounted) return;
+      final message = notificationDisplayMessage(notification);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(message)));
+    });
     realtime.on('ReceiveLocationUpdate', (args) {
       if (args == null || args.isEmpty) return;
       final payload = asMap(args.first);
       final lat = asDouble(payload['lat']);
       final lng = asDouble(payload['lng']);
       if (mounted) setState(() => _driverLocation = LatLng(lat, lng));
+    });
+    realtime.on('BookingAccepted', (args) {
+      if (!mounted) return;
+      final payload = args == null || args.isEmpty
+          ? const {}
+          : asMap(args.first);
+      final bookingId =
+          payload['bookingId']?.toString() ?? _booking?['id']?.toString();
+      if (bookingId != null && bookingId == _booking?['id']?.toString()) {
+        setState(() {
+          _eventNotice = 'Your ride request was accepted by the driver.';
+          _booking = {..._booking ?? const {}, 'status': 'Accepted'};
+        });
+      }
+    });
+    realtime.on('BookingRejected', (args) {
+      if (!mounted) return;
+      final payload = args == null || args.isEmpty
+          ? const {}
+          : asMap(args.first);
+      final reason =
+          payload['reason']?.toString() ?? 'The driver rejected your booking.';
+      setState(() => _eventNotice = reason);
+      context.go('/home');
+    });
+    realtime.on('BookingAutoCancelled', (args) {
+      if (!mounted) return;
+      final payload = args == null || args.isEmpty
+          ? const {}
+          : asMap(args.first);
+      final reason =
+          payload['reason']?.toString() ??
+          'This ride was automatically cancelled.';
+      setState(() => _eventNotice = reason);
+      context.go('/home');
     });
     realtime.on('DriverArrivedAtStop', (args) {
       if (mounted) {
@@ -515,27 +1221,56 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
       setState(() {
         _booking = booking;
         _ride = ride;
+        _noActiveBooking = false;
+        _realtimeError = null;
         if (lat != null && lng != null) {
           _driverLocation = LatLng(asDouble(lat), asDouble(lng));
         }
         _loading = false;
         _error = null;
       });
-      if (rideId != null) {
-        final realtime = ref.read(signalRServiceProvider);
-        await realtime.connect();
-        await realtime.joinRide(rideId);
+      final passengerId = ref.read(appSessionProvider)?.userId;
+      final bookingStatus = booking['status']?.toString().toLowerCase();
+      if (rideId != null &&
+          passengerId != null &&
+          passengerId.isNotEmpty &&
+          (bookingStatus == 'accepted' || bookingStatus == 'active')) {
+        try {
+          final realtime = ref.read(signalRServiceProvider);
+          await realtime.connect();
+          await realtime.joinRide(rideId);
+          await realtime.joinPassengerRide(rideId, passengerId);
+        } catch (error) {
+          if (mounted) {
+            setState(() {
+              _realtimeError =
+                  'Live ride updates are unavailable. Refresh to retry. ($error)';
+            });
+          }
+        }
       }
     } on ApiFailure catch (failure) {
       if (!mounted) return;
       setState(() {
-        _error = failure.message;
+        _noActiveBooking = failure.statusCode == 404 ||
+            failure.message.contains('No active booking');
+        _error = _noActiveBooking ? null : failure.message;
         _loading = false;
-        if (failure.statusCode == 404 ||
-            failure.message.contains('No active booking')) {
+        if (_noActiveBooking) {
           _booking = null;
         }
       });
+      if (failure.statusCode != 404) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(failure.message),
+            action: SnackBarAction(
+              label: 'Retry',
+              onPressed: () => unawaited(_load()),
+            ),
+          ),
+        );
+      }
     }
   }
 
@@ -575,7 +1310,7 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
       builder: (context) => AlertDialog(
         title: const Text('Report driver no-show?'),
         content: const Text(
-          'Confirm only after you have waited at your pickup stop for at least 3 minutes.',
+          'Report only after the ride has started, at least 3 minutes have passed, and the driver has not arrived at your pickup stop.',
         ),
         actions: [
           TextButton(
@@ -593,7 +1328,7 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
     try {
       await ref
           .read(mobileApiProvider)
-          .putData('passenger/bookings/$bookingId/no-show');
+          .postData('passenger/bookings/$bookingId/no-show');
       if (mounted) setState(() => _eventNotice = 'No-show report submitted.');
     } on ApiFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -610,9 +1345,21 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    final notificationSubscription = _notificationSubscription;
+    if (notificationSubscription != null) {
+      unawaited(notificationSubscription.cancel());
+    }
     final rideId = _booking?['rideId']?.toString();
+    final passengerId = ref.read(appSessionProvider)?.userId;
     if (rideId != null) {
       unawaited(ref.read(signalRServiceProvider).leaveRide(rideId));
+      if (passengerId != null && passengerId.isNotEmpty) {
+        unawaited(
+          ref
+              .read(signalRServiceProvider)
+              .leavePassengerRide(rideId, passengerId),
+        );
+      }
     }
     super.dispose();
   }
@@ -623,12 +1370,41 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
       return const Scaffold(body: LoadingPane(label: 'Loading your booking'));
     }
     if (_booking == null) {
+      if (_noActiveBooking) {
+        return Scaffold(
+          appBar: AppBar(title: const Text('Active booking')),
+          body: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.event_seat_outlined, size: 42),
+                  const SizedBox(height: 12),
+                  Text(
+                    'No active booking',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Your ride requests and current bookings will appear here.',
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton(
+                    onPressed:
+                        widget.onBrowseRides ?? () => context.go('/home'),
+                    child: const Text('Browse rides'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      }
       return Scaffold(
         appBar: AppBar(title: const Text('Active booking')),
-        body: ErrorPane(
-          message: _error ?? 'You do not have an active booking.',
-          onRetry: _load,
-        ),
+        body: ErrorPane(message: _error ?? 'The booking could not be loaded.', onRetry: _load),
       );
     }
     final booking = _booking!;
@@ -677,7 +1453,10 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
               ),
-              StateLabel(status),
+              LifecycleStatusSummary(
+                status: status,
+                kind: LifecycleStatusKind.booking,
+              ),
             ],
           ),
           const SizedBox(height: 6),
@@ -703,6 +1482,10 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
             const SizedBox(height: 12),
             NoticeStrip(message: _error!, isError: true),
           ],
+          if (_realtimeError != null) ...[
+            const SizedBox(height: 12),
+            NoticeStrip(message: _realtimeError!, isError: true),
+          ],
           if (status.toLowerCase() == 'completed') ...[
             const SizedBox(height: 12),
             const NoticeStrip(
@@ -715,15 +1498,17 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
               'Waiting for the driver to accept. Requests expire after two minutes.',
             ),
           if (status.toLowerCase() == 'accepted' ||
-              status.toLowerCase() == 'active' ||
-              status.toLowerCase() == 'pending') ...[
+              status.toLowerCase() == 'active') ...[
             OutlinedButton.icon(
               onPressed: _noShow,
               icon: const Icon(Icons.report_gmailerrorred_outlined),
               label: const Text('Driver has not arrived'),
             ),
-            TextButton(onPressed: _cancel, child: const Text('Cancel booking')),
           ],
+          if (status.toLowerCase() == 'accepted' ||
+              status.toLowerCase() == 'active' ||
+              status.toLowerCase() == 'pending')
+            TextButton(onPressed: _cancel, child: const Text('Cancel booking')),
         ],
       ),
     );
