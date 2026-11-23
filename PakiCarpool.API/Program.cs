@@ -94,6 +94,7 @@ builder.Services.AddSingleton<ITokenRevocationService, TokenRevocationService>()
 // ─────────────────────────────────────────────────────────────
 builder.Services.AddScoped<IUserSessionService, UserSessionService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<IAdminBootstrapService, AdminBootstrapService>();
 builder.Services.AddScoped<IDriverService, DriverService>();
 builder.Services.AddScoped<IPassengerService, PassengerService>();
 builder.Services.AddScoped<IRideSearchService, RideSearchService>();
@@ -102,6 +103,7 @@ builder.Services.AddScoped<IChatService, ChatService>();
 builder.Services.AddScoped<IAdminService, AdminService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ILivenessService, LivenessService>();
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<Supabase.Client>(_ => new Supabase.Client(
     builder.Configuration["SUPABASE_URL"] ?? Environment.GetEnvironmentVariable("SUPABASE_URL") ?? string.Empty,
     builder.Configuration["SUPABASE_KEY"] ?? Environment.GetEnvironmentVariable("SUPABASE_KEY") ?? string.Empty,

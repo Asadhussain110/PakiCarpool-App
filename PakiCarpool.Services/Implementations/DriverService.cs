@@ -29,6 +29,7 @@ public class DriverService : IDriverService
     private readonly IEmailService _emailService;
     private readonly AesEncryptionHelper _aesHelper;
     private readonly IHubContext<Microsoft.AspNetCore.SignalR.Hub> _hubContext;
+    private readonly TimeProvider _timeProvider;
 
     public DriverService(
         IUserRepository userRepository,
@@ -40,7 +41,8 @@ public class DriverService : IDriverService
         ITrustService trustService,
         IEmailService emailService,
         AesEncryptionHelper aesHelper,
-        IHubContext<Microsoft.AspNetCore.SignalR.Hub> hubContext)
+        IHubContext<Microsoft.AspNetCore.SignalR.Hub> hubContext,
+        TimeProvider? timeProvider = null)
     {
         _userRepository = userRepository;
         _context = context;
@@ -52,6 +54,7 @@ public class DriverService : IDriverService
         _emailService = emailService;
         _aesHelper = aesHelper;
         _hubContext = hubContext;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -250,7 +253,7 @@ public class DriverService : IDriverService
     /// <summary>
     /// Cancels a ride. Within 5-minute grace period: no penalty.
     /// After grace period: cancellation classification and trust point deduction apply.
-    /// Notifies all Accepted and Active passengers.
+    /// Notifies all Pending, Accepted, and Active passengers.
     /// </summary>
     public async Task<ApiResponse<object>> CancelRideAsync(Guid driverId, Guid rideId, CancelRideDto dto)
     {
@@ -258,7 +261,7 @@ public class DriverService : IDriverService
         if (profile is null)
             return new ApiResponse<object> { Message = "Driver profile not found." };
 
-        var ride = await _rideRepository.GetByIdAsync(rideId, includeBookings: true);
+        var ride = await _rideRepository.GetByIdAsync(rideId, includeStops: true, includeBookings: true);
         if (ride is null || ride.DriverId != profile.Id)
             return new ApiResponse<object> { Message = "Ride not found." };
 
@@ -294,9 +297,10 @@ public class DriverService : IDriverService
             }
         }
 
-        // Notify all Accepted and Active passengers
+        // Pending requests occupy no seats, but follow the same cancellation and
+        // notification path as Accepted and Active bookings when their ride ends.
         var bookingsToNotify = ride.Bookings?
-            .Where(b => b.Status is BookingStatus.Accepted or BookingStatus.Active)
+            .Where(b => b.Status is BookingStatus.Pending or BookingStatus.Accepted or BookingStatus.Active)
             .ToList() ?? new List<Booking>();
 
         // Named event to ride group first (one broadcast vs. N per-user broadcasts)
@@ -398,47 +402,43 @@ public class DriverService : IDriverService
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Accepts a pending booking request. Re-validates seat capacity for race condition safety.
-    /// Notifies the passenger via SignalR.
+    /// Atomically accepts a pending booking after rechecking timeout, ride state,
+    /// and per-segment capacity under a database lock. Notifies the passenger via SignalR.
     /// </summary>
     public async Task<ApiResponse<object>> AcceptBookingAsync(Guid driverId, Guid bookingId)
     {
         var (profile, booking, error) = await GetBookingForDriverAsync(driverId, bookingId);
         if (error is not null) return new ApiResponse<object> { Message = error };
 
-        if (booking!.Status != BookingStatus.Pending)
+        var (outcome, acceptedBooking) = await _bookingRepository.AcceptPendingAsync(
+            bookingId,
+            _timeProvider.GetUtcNow().UtcDateTime);
+        if (outcome != BookingAcceptanceOutcome.Accepted)
         {
-            var message = booking.Status switch
+            if (outcome == BookingAcceptanceOutcome.TimedOut && acceptedBooking is not null)
+                await NotifyBookingTimedOutAsync(acceptedBooking);
+
+            var message = outcome switch
             {
-                BookingStatus.Cancelled => "Booking was cancelled and can no longer be accepted.",
-                BookingStatus.Accepted => "Booking has already been accepted.",
-                BookingStatus.Rejected => "Booking has already been rejected.",
+                BookingAcceptanceOutcome.NotFound => "Booking not found.",
+                BookingAcceptanceOutcome.RideNotFound => "Ride not found.",
+                BookingAcceptanceOutcome.StopsNotFound => "Booking stops not found.",
+                BookingAcceptanceOutcome.RideCancelled => "Ride is cancelled and cannot accept bookings.",
+                BookingAcceptanceOutcome.RideCompleted => "Ride is completed and cannot accept bookings.",
+                BookingAcceptanceOutcome.AlreadyAccepted => "Booking has already been accepted.",
+                BookingAcceptanceOutcome.Cancelled => "Booking was cancelled and can no longer be accepted.",
+                BookingAcceptanceOutcome.Rejected => "Booking has already been rejected.",
+                BookingAcceptanceOutcome.SegmentFull => ErrorCodes.StopSegmentFull,
+                BookingAcceptanceOutcome.TimedOut => "Booking has timed out and can no longer be accepted.",
                 _ => "Booking is no longer in a pending state."
             };
             return new ApiResponse<object> { Message = message };
         }
 
-        // Re-validate seat capacity (race condition guard)
-        var pickupStop = await _rideRepository.GetStopByIdAsync(booking.PickupStopId);
-        var dropoffStop = await _rideRepository.GetStopByIdAsync(booking.DropoffStopId);
-        if (pickupStop is null || dropoffStop is null)
-            return new ApiResponse<object> { Message = "Booking stops not found." };
-
+        booking = acceptedBooking!;
         var ride = await _rideRepository.GetByIdAsync(booking.RideId);
         if (ride is null)
             return new ApiResponse<object> { Message = "Ride not found." };
-
-        var overlapping = await _bookingRepository.GetOverlappingBookingCountAsync(
-            booking.RideId,
-            pickupStop.SequenceOrder,
-            dropoffStop.SequenceOrder);
-
-        if (overlapping >= ride.MaxSeats)
-            return new ApiResponse<object> { Message = ErrorCodes.StopSegmentFull };
-
-        booking.Status = BookingStatus.Accepted;
-        booking.AcceptedAt = DateTime.UtcNow;
-        await _bookingRepository.UpdateAsync(booking);
 
         // Named event — passenger receives structured payload for Flutter UI
         var driverUser = await _userRepository.GetByIdAsync(driverId);
@@ -568,6 +568,7 @@ public class DriverService : IDriverService
 
     /// <summary>
     /// Marks the next stop as active when the driver begins travelling toward it.
+    /// Travel may begin while the ride is Posted; a valid first-stop arrival moves it to Active.
     /// </summary>
     public async Task<ApiResponse<object>> BeginStopTravelAsync(Guid driverId, Guid stopId)
     {
@@ -607,9 +608,9 @@ public class DriverService : IDriverService
     }
 
     /// <summary>
-    /// Marks a stop as arrived. Validates it is the next un-completed stop in sequence.
-    /// Notifies passengers with pickup at this stop.
-    /// Generates navigation deep-link to the next stop.
+    /// Marks a stop as arrived. A valid first-stop arrival moves a Posted ride to Active.
+    /// Validates ownership, stop sequence, GPS freshness, and the 150-meter arrival radius.
+    /// Notifies passengers with pickup at this stop and generates a navigation deep-link to the next stop.
     /// </summary>
     public async Task<ApiResponse<object>> MarkStopArrivedAsync(Guid driverId, Guid stopId)
     {
@@ -828,7 +829,8 @@ public class DriverService : IDriverService
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Updates driver GPS location. Upsert pattern: one record per driver per ride.
+    /// Updates driver GPS location for a Posted or Active ride owned by the driver.
+    /// Upsert pattern: one record per driver per ride.
     /// Broadcasts location update to all passengers in the ride group via SignalR.
     /// </summary>
     public async Task<ApiResponse<object>> UpdateLocationAsync(Guid driverId, DriverLocationDto dto)
@@ -850,8 +852,8 @@ public class DriverService : IDriverService
         if (ride.DriverId != profile.Id)
             return new ApiResponse<object> { Message = "You are not authorized to update location for this ride." };
 
-        if (ride.Status != RideStatus.Active)
-            return new ApiResponse<object> { Message = "Location can only be updated for an active ride." };
+        if (ride.Status is not RideStatus.Posted and not RideStatus.Active)
+            return new ApiResponse<object> { Message = "Location can only be updated for a posted or active ride." };
 
         var location = new DriverLocation
         {
@@ -908,6 +910,16 @@ public class DriverService : IDriverService
     // ──────────────────────────────────────────────────────────────────────────
     // Private Helpers
     // ──────────────────────────────────────────────────────────────────────────
+
+    private async Task NotifyBookingTimedOutAsync(Booking booking)
+    {
+        await _notificationService.SendBookingAutoCancelledAsync(booking.PassengerId, booking.Id);
+        await _notificationService.SendNotificationAsync(
+            booking.PassengerId,
+            NotificationType.BookingAutoCancelled,
+            "Booking Timed Out",
+            "Your booking request expired because the driver did not respond in time.");
+    }
 
     private async Task<(DriverProfile? profile, Booking? booking, string? error)>
         GetBookingForDriverAsync(Guid driverId, Guid bookingId, CancellationToken cancellationToken = default)

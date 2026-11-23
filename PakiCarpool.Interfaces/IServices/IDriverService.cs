@@ -50,7 +50,8 @@ public interface IDriverService
         PaginationParams pagination);
 
     /// <summary>
-    /// Accepts a pending booking request. Re-validates seat capacity for race condition safety.
+    /// Atomically accepts a pending booking after rechecking timeout, terminal ride state,
+    /// and per-segment capacity in one database transaction.
     /// </summary>
     Task<ApiResponse<object>> AcceptBookingAsync(Guid driverId, Guid bookingId);
 
@@ -77,6 +78,7 @@ public interface IDriverService
 
     /// <summary>
     /// Marks the next stop as active when the driver begins travelling toward it.
+    /// Travel may begin while Posted; the first valid stop arrival moves the ride to Active.
     /// </summary>
     Task<ApiResponse<object>> BeginStopTravelAsync(Guid driverId, Guid stopId);
 
@@ -86,7 +88,8 @@ public interface IDriverService
     Task<ApiResponse<object>> MarkStopArrivedAsync(Guid driverId, Guid stopId);
 
     /// <summary>
-    /// Updates driver's GPS location. Upsert pattern: one record per driver per ride.
+    /// Updates driver's GPS location for a Posted or Active ride owned by the driver.
+    /// Upsert pattern: one record per driver per ride.
     /// </summary>
     Task<ApiResponse<object>> UpdateLocationAsync(Guid driverId, DriverLocationDto dto);
 

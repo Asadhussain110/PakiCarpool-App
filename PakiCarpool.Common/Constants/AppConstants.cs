@@ -28,6 +28,7 @@ public static class AppConstants
 
     // Booking
     public const int BookingTimeoutMinutes = 2;
+    public const string BookingTimeoutCancelReason = "Auto-cancelled: driver did not respond within 2 minutes";
     public const int MinCancelReasonLength = 10;
     public const int NoShowWaitMinutes = 3;
     public const int NoShowGraceMinutes = 3;

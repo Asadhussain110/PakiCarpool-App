@@ -1130,7 +1130,8 @@ class _ActiveRideScreenState extends ConsumerState<ActiveRideScreen> {
         _loading = false;
       });
       _listenForBookingRequests();
-      if ('${ride['status']}'.toLowerCase() == 'active') {
+      final rideStatus = '${ride['status']}'.toLowerCase();
+      if (rideStatus == 'posted' || rideStatus == 'active') {
         await _startLocationSharing();
       }
     } on ApiFailure catch (failure) {

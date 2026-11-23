@@ -39,6 +39,11 @@ public interface IUserRepository
     Task<User> CreateWithDriverProfileAsync(User user, DriverProfile? driverProfile, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Atomically creates the first admin and TOTP secret only if no admin exists.
+    /// </summary>
+    Task<bool> CreateFirstAdminAsync(User user, TotpSecret totpSecret, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Atomically increments the user's login failure count.
     /// </summary>
     Task IncrementLoginFailAsync(Guid userId);

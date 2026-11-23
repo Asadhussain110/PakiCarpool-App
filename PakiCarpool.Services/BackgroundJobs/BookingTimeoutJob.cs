@@ -16,11 +16,16 @@ public class BookingTimeoutJob : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<BookingTimeoutJob> _logger;
+    private readonly TimeProvider _timeProvider;
 
-    public BookingTimeoutJob(IServiceScopeFactory scopeFactory, ILogger<BookingTimeoutJob> logger)
+    public BookingTimeoutJob(
+        IServiceScopeFactory scopeFactory,
+        ILogger<BookingTimeoutJob> logger,
+        TimeProvider? timeProvider = null)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <inheritdoc />
@@ -41,22 +46,27 @@ public class BookingTimeoutJob : BackgroundService
         }
     }
 
-    private async Task ProcessTimeoutsAsync(CancellationToken cancellationToken)
+    internal async Task ProcessTimeoutsAsync(CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var bookingRepository = scope.ServiceProvider.GetRequiredService<IBookingRepository>();
         var notificationService = scope.ServiceProvider.GetRequiredService<INotificationService>();
 
-        var cutoff = DateTime.UtcNow.AddMinutes(-AppConstants.BookingTimeoutMinutes);
+        var cutoff = _timeProvider.GetUtcNow().UtcDateTime.AddMinutes(-AppConstants.BookingTimeoutMinutes);
         var timedOut = await bookingRepository.GetTimedOutPendingBookingsAsync(cutoff);
 
-        foreach (var booking in timedOut)
+        foreach (var candidate in timedOut)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            booking.Status = BookingStatus.Cancelled;
-            booking.CancelReason = "Auto-cancelled: driver did not respond within 2 minutes";
-            await bookingRepository.UpdateAsync(booking);
+            // Acceptance and timeout use the same ride lock. Only the operation that
+            // actually changes Pending to Cancelled receives a booking to notify.
+            var booking = await bookingRepository.CancelTimedOutAsync(
+                candidate.Id,
+                cutoff,
+                cancellationToken);
+            if (booking is null)
+                continue;
 
             // Named event — Flutter client receives structured bookingId payload
             await notificationService.SendBookingAutoCancelledAsync(booking.PassengerId, booking.Id);

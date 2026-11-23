@@ -1,3 +1,4 @@
+using PakiCarpool.Domain.Enums;
 using PakiCarpool.Domain.Models;
 
 namespace PakiCarpool.Interfaces.IRepositories;
@@ -29,8 +30,26 @@ public interface IBookingRepository
     Task<(List<Booking> Items, int TotalCount)> GetBookingsByRideIdAsync(Guid rideId, int page, int pageSize);
 
     /// <summary>
+    /// Atomically accepts a pending booking after locking its ride, rechecking its status,
+    /// timeout, ride state, and per-segment capacity in one database transaction.
+    /// </summary>
+    Task<(BookingAcceptanceOutcome Outcome, Booking? Booking)> AcceptPendingAsync(
+        Guid bookingId,
+        DateTime utcNow,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically cancels a booking only if it is still pending and older than the cutoff.
+    /// Returns the cancelled booking only to the caller that performed the transition.
+    /// </summary>
+    Task<Booking?> CancelTimedOutAsync(
+        Guid bookingId,
+        DateTime cutoff,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Gets all timed-out pending bookings (RequestedAt older than timeout threshold).
-    /// Used by BookingTimeoutJob.
+    /// Used by BookingTimeoutJob to locate candidates; cancellation is performed conditionally.
     /// </summary>
     Task<List<Booking>> GetTimedOutPendingBookingsAsync(DateTime cutoff);
 
@@ -51,8 +70,8 @@ public interface IBookingRepository
     Task<int> GetOverlappingBookingCountAsync(Guid rideId, int requestedPickupOrder, int requestedDropoffOrder);
 
     /// <summary>
-    /// Checks if all bookings for a ride are completed or cancelled.
-    /// Used to determine if ride should be marked as Completed.
+    /// Checks if all bookings are Completed, Cancelled, or Rejected.
+    /// Pending requests and Accepted/Active bookings still block ride completion.
     /// </summary>
     Task<bool> AreAllBookingsCompletedOrCancelledAsync(Guid rideId);
 }

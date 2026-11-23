@@ -1080,6 +1080,11 @@ class _PassengerRideDetailScreenState
   }
 }
 
+bool isBookingCancellable(String status) {
+  final normalizedStatus = status.toLowerCase();
+  return normalizedStatus == 'pending' || normalizedStatus == 'accepted';
+}
+
 class ActiveBookingScreen extends ConsumerStatefulWidget {
   const ActiveBookingScreen({this.onBrowseRides, super.key});
 
@@ -1505,9 +1510,7 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
               label: const Text('Driver has not arrived'),
             ),
           ],
-          if (status.toLowerCase() == 'accepted' ||
-              status.toLowerCase() == 'active' ||
-              status.toLowerCase() == 'pending')
+          if (isBookingCancellable(status))
             TextButton(onPressed: _cancel, child: const Text('Cancel booking')),
         ],
       ),

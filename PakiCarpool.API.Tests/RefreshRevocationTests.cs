@@ -27,7 +27,7 @@ public sealed class RefreshRevocationTests
     public async Task ConcurrentDoubleRefresh_ProducesOnlyOneSession()
     {
         var fixture = new RefreshFixture(UserRole.Passenger);
-        fixture.BlockTokenLookupsUntilBothRequestsArrive();
+        fixture.BlockTokenConsumptionUntilBothRequestsArrive();
 
         var responses = await Task.WhenAll(
             fixture.AuthService.RefreshTokenAsync(RefreshFixture.RawRefreshToken),
@@ -114,6 +114,8 @@ public sealed class RefreshRevocationTests
     {
         public const string RawRefreshToken = "single-use-refresh-token";
         private int _consumeCount;
+        private int _consumeArrivalCount;
+        private TaskCompletionSource? _bothTokenConsumptionsArrived;
 
         public RefreshFixture(UserRole role)
         {
@@ -158,8 +160,16 @@ public sealed class RefreshRevocationTests
                     HashedRefreshToken,
                     It.IsAny<DateTime>(),
                     It.IsAny<CancellationToken>()))
-                .ReturnsAsync(() =>
+                .Returns(async () =>
                 {
+                    if (_bothTokenConsumptionsArrived is not null)
+                    {
+                        if (Interlocked.Increment(ref _consumeArrivalCount) == 2)
+                            _bothTokenConsumptionsArrived.TrySetResult();
+
+                        await _bothTokenConsumptionsArrived.Task;
+                    }
+
                     if (Interlocked.CompareExchange(ref _consumeCount, 1, 0) != 0)
                         return false;
 
@@ -202,20 +212,10 @@ public sealed class RefreshRevocationTests
         public Mock<IHCaptchaService> Captcha { get; } = new();
         public Mock<IWebHostEnvironment> Environment { get; } = new();
 
-        public void BlockTokenLookupsUntilBothRequestsArrive()
+        public void BlockTokenConsumptionUntilBothRequestsArrive()
         {
-            var lookupCount = 0;
-            var bothRequestsArrived = new TaskCompletionSource(
+            _bothTokenConsumptionsArrived = new TaskCompletionSource(
                 TaskCreationOptions.RunContinuationsAsynchronously);
-            Users.Setup(repository => repository.GetRefreshTokenAsync(HashedRefreshToken))
-                .Returns(async () =>
-                {
-                    if (Interlocked.Increment(ref lookupCount) == 2)
-                        bothRequestsArrived.TrySetResult();
-
-                    await bothRequestsArrived.Task;
-                    return StoredToken;
-                });
         }
 
         private static string HashRefreshToken(string token)

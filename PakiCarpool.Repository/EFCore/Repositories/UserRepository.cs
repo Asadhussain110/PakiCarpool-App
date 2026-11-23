@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using PakiCarpool.Domain.Enums;
 using PakiCarpool.Domain.Models;
@@ -72,6 +73,30 @@ public class UserRepository : IUserRepository
             await _context.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return user;
+        });
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> CreateFirstAdminAsync(
+        User user,
+        TotpSecret totpSecret,
+        CancellationToken cancellationToken = default)
+    {
+        var strategy = _context.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await _context.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable,
+                cancellationToken);
+
+            if (await _context.Users.AnyAsync(u => u.Role == UserRole.Admin, cancellationToken))
+                return false;
+
+            _context.Users.Add(user);
+            _context.TotpSecrets.Add(totpSecret);
+            await _context.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return true;
         });
     }
 
