@@ -533,7 +533,11 @@ public class DriverService : IDriverService
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Submits a passenger no-show claim for administrator review after the verified pickup arrival grace period.
+    /// Records a passenger no-show. Only the driver of the booking's ride may report it,
+    /// and only after waiting 3 minutes from the driver's verified arrival at that
+    /// booking's pickup stop. The log, the -10 trust penalty for the passenger, and the
+    /// booking cancellation are persisted atomically; one report per booking is enforced
+    /// by the database, so repeated or concurrent reports never double-penalize.
     /// </summary>
     public async Task<ApiResponse<object>> MarkPassengerNoShowAsync(
         Guid driverId,
@@ -543,23 +547,85 @@ public class DriverService : IDriverService
         var (_, booking, error) = await GetBookingForDriverAsync(driverId, bookingId, cancellationToken);
         if (error is not null) return new ApiResponse<object> { Message = error };
 
-        if (booking!.Status is not BookingStatus.Accepted and not BookingStatus.Active)
+        if (booking!.Status is not (BookingStatus.Accepted or BookingStatus.Active))
             return new ApiResponse<object> { Message = "Booking must be Accepted or Active to report a no-show." };
 
-        var pickupStop = await _rideRepository.GetStopByIdAsync(booking.PickupStopId, cancellationToken);
-        if (pickupStop is null || pickupStop.Status != RideStopStatus.Completed ||
-            pickupStop.ArrivedAt is not DateTime arrivedAt ||
-            DateTime.UtcNow - arrivedAt < TimeSpan.FromMinutes(AppConstants.NoShowGraceMinutes))
+        var ride = booking.Ride ?? await _rideRepository.GetByIdAsync(booking.RideId, cancellationToken: cancellationToken);
+        if (ride is null)
+            return new ApiResponse<object> { Message = ErrorCodes.NotFound };
+
+        if (ride.Status is RideStatus.Cancelled or RideStatus.Completed)
+            return new ApiResponse<object> { Message = "Ride is no longer active." };
+
+        var pickupStop = booking.PickupStop
+            ?? await _rideRepository.GetStopByIdAsync(booking.PickupStopId, cancellationToken);
+
+        if (pickupStop is null ||
+            pickupStop.Status != RideStopStatus.Completed ||
+            pickupStop.ArrivedAt is not DateTime arrivedAt)
         {
-            return new ApiResponse<object> { Message = "No-show grace period has not elapsed." };
+            return new ApiResponse<object>
+            {
+                Message = "You must arrive at the passenger's pickup stop before reporting a no-show."
+            };
         }
 
-        return await _flagService.CreateFlagAsync(driverId, new FlagDto
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        if (now - arrivedAt < TimeSpan.FromMinutes(AppConstants.NoShowWaitMinutes))
+            return new ApiResponse<object>
+            {
+                Message = $"The passenger can still arrive — the {AppConstants.NoShowWaitMinutes}-minute wait has not elapsed."
+            };
+
+        var log = new NoShowLog
         {
-            ReporteeId = booking.PassengerId,
+            Id = Guid.NewGuid(),
+            ReporterId = driverId,
+            OffenderId = booking.PassengerId,
             RideId = booking.RideId,
-            Reason = $"Passenger no-show claim for booking {booking.Id} at pickup stop {pickupStop.Name}."
-        }, cancellationToken);
+            BookingId = booking.Id,
+            CreatedAt = now
+        };
+
+        var outcome = await _bookingRepository.RecordNoShowAsync(
+            log,
+            [BookingStatus.Accepted, BookingStatus.Active],
+            AppConstants.NoShowPassengerCancelReason,
+            AppConstants.NoShowPenalty,
+            now,
+            cancellationToken);
+
+        if (outcome != NoShowRecordingOutcome.Recorded)
+        {
+            var message = outcome switch
+            {
+                NoShowRecordingOutcome.AlreadyReported =>
+                    "A no-show has already been recorded for this booking.",
+                NoShowRecordingOutcome.BookingNotEligible =>
+                    "Booking is no longer eligible for a no-show report.",
+                _ => ErrorCodes.NotFound
+            };
+            return new ApiResponse<object> { Message = message };
+        }
+
+        // Post-commit side effects: free the seat by the same status-based occupancy
+        // and group-removal semantics as every other booking cancellation, notify the
+        // offender (in-app + email per the notification matrix), and recheck thresholds.
+        await _notificationService.RemovePassengerFromRideGroupsAsync(booking.RideId, booking.PassengerId);
+
+        var passenger = await _userRepository.GetByIdAsync(booking.PassengerId, cancellationToken);
+        await _notificationService.SendInAppNotificationAsync(
+            booking.PassengerId,
+            NotificationType.NoShowRecorded,
+            "No-Show Recorded",
+            "You were recorded as a no-show at your pickup stop. Repeated no-shows lead to admin review of your account.");
+        if (passenger is not null)
+            await _emailService.SendNoShowEmailAsync(passenger.Email, passenger.FullName);
+
+        await _trustService.CheckThresholdsAsync(booking.PassengerId);
+
+        return ApiResponse<object>.SuccessMessage(
+            "Passenger no-show recorded. The booking has been cancelled.");
     }
 
     // ──────────────────────────────────────────────────────────────────────────

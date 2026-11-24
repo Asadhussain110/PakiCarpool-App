@@ -24,6 +24,12 @@ public interface IAdminRepository
     Task<int> CountOpenFlagsAsync();
 
     /// <summary>
+    /// Gets all open flags raised against a user (as reportee).
+    /// Used to keep threshold-raised admin-review flags idempotent.
+    /// </summary>
+    Task<List<Flag>> GetOpenFlagsByReporteeIdAsync(Guid reporteeId);
+
+    /// <summary>
     /// Creates a new flag.
     /// </summary>
     Task<Flag> CreateFlagAsync(Flag flag, CancellationToken cancellationToken = default);

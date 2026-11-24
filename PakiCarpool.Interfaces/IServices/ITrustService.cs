@@ -35,7 +35,7 @@ public interface ITrustService
     /// <summary>
     /// Checks all trust-related thresholds for a user and triggers appropriate actions.
     /// Frivolous cancellations >= 3: warning. >= 5: suspend.
-    /// No-shows >= 2: warning. >= 4: suspend.
+    /// No-shows >= 2: warning. >= 4: open an admin-review flag (suspension is an admin decision).
     /// Trust score < 50: warning. < 30: suspend.
     /// </summary>
     Task CheckThresholdsAsync(Guid userId);

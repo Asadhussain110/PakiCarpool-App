@@ -48,6 +48,21 @@ public interface IBookingRepository
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Atomically records a no-show outcome in one transaction under the ride lock:
+    /// persists the NoShowLog (one per booking), deducts trust points from the offender
+    /// (floored at zero), and cancels the booking with the supplied reason.
+    /// The unique index on NoShowLogs.BookingId backs the one-report-per-booking rule,
+    /// so retries and concurrent reports never double-penalize.
+    /// </summary>
+    Task<NoShowRecordingOutcome> RecordNoShowAsync(
+        NoShowLog log,
+        IReadOnlyCollection<BookingStatus> eligibleBookingStatuses,
+        string cancelReason,
+        int trustPenaltyPoints,
+        DateTime utcNow,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Gets all timed-out pending bookings (RequestedAt older than timeout threshold).
     /// Used by BookingTimeoutJob to locate candidates; cancellation is performed conditionally.
     /// </summary>

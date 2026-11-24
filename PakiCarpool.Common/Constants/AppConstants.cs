@@ -17,7 +17,7 @@ public static class AppConstants
     public const int FrivolousCancellationWarningThreshold = 3;
     public const int FrivolousCancellationSuspendThreshold = 5;
     public const int NoShowWarningThreshold = 2;
-    public const int NoShowSuspendThreshold = 4;
+    public const int NoShowAdminReviewThreshold = 4;
     public const int TrustScoreWarningThreshold = 50;
     public const int TrustScoreSuspendThreshold = 30;
 
@@ -31,7 +31,10 @@ public static class AppConstants
     public const string BookingTimeoutCancelReason = "Auto-cancelled: driver did not respond within 2 minutes";
     public const int MinCancelReasonLength = 10;
     public const int NoShowWaitMinutes = 3;
-    public const int NoShowGraceMinutes = 3;
+    public const int NoShowGpsFreshnessMinutes = 3;
+    public const string NoShowPassengerCancelReason = "Cancelled: passenger no-show at pickup stop";
+    public const string NoShowDriverCancelReason = "Cancelled: driver no-show at pickup";
+    public const string NoShowReviewFlagReason = "Repeated no-shows: admin review required for suspension";
 
     // Authentication
     public const int MaxLoginAttempts = 5;

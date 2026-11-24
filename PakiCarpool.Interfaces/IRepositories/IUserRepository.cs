@@ -235,12 +235,13 @@ public interface IUserRepository
     Task<int> CountNoShowsAsync(Guid userId);
 
     /// <summary>
+    /// Gets the most recent no-show recorded against a user as offender.
+    /// Used to attribute the admin-review flag raised at the no-show threshold.
+    /// </summary>
+    Task<NoShowLog?> GetLatestNoShowByOffenderAsync(Guid offenderId);
+
+    /// <summary>
     /// Creates a cancellation log entry.
     /// </summary>
     Task CreateCancellationLogAsync(CancellationLog log);
-
-    /// <summary>
-    /// Creates a no-show log entry.
-    /// </summary>
-    Task CreateNoShowLogAsync(NoShowLog log);
 }

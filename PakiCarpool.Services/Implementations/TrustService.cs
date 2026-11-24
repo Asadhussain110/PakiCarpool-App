@@ -1,5 +1,6 @@
 using PakiCarpool.Common.Constants;
 using PakiCarpool.Domain.Enums;
+using PakiCarpool.Domain.Models;
 using PakiCarpool.Interfaces.IRepositories;
 using PakiCarpool.Interfaces.IServices;
 
@@ -139,24 +140,32 @@ public class TrustService : ITrustService
         }
 
         // ── No-show thresholds ─────────────────────────────────────────────────
-        if (noShowCount >= AppConstants.NoShowSuspendThreshold)
+        // Suspension for repeated no-shows is an admin decision by design:
+        // at the threshold an open flag is raised once for admin review — never an automatic suspension.
+        if (noShowCount >= AppConstants.NoShowAdminReviewThreshold)
         {
-            if (!user.IsSuspended)
+            var openFlags = await _adminRepository.GetOpenFlagsByReporteeIdAsync(userId);
+            if (!openFlags.Any(f => f.Reason == AppConstants.NoShowReviewFlagReason))
             {
-                user.IsSuspended = true;
-                user.IsActive = false;
-                await _userRepository.UpdateAsync(user);
-
-                var reason = "Repeated no-shows. Your account has been suspended.";
-                await _notificationService.SendInAppNotificationAsync(
-                    userId, NotificationType.AccountSuspended,
-                    "Account Suspended", reason);
-                await _emailService.SendSuspensionEmailAsync(user.Email, user.FullName, reason);
+                var latestNoShow = await _userRepository.GetLatestNoShowByOffenderAsync(userId);
+                if (latestNoShow is not null)
+                {
+                    await _adminRepository.CreateFlagAsync(new Flag
+                    {
+                        Id = Guid.NewGuid(),
+                        ReporterId = latestNoShow.ReporterId,
+                        ReporteeId = userId,
+                        RideId = latestNoShow.RideId,
+                        Reason = AppConstants.NoShowReviewFlagReason,
+                        Status = FlagStatus.Open,
+                        CreatedAt = DateTime.UtcNow
+                    });
+                }
             }
         }
         else if (noShowCount >= AppConstants.NoShowWarningThreshold)
         {
-            var reason = $"You have {noShowCount} no-shows recorded. At 4, your account will be suspended.";
+            var reason = $"You have {noShowCount} no-shows recorded. At {AppConstants.NoShowAdminReviewThreshold}, your account will be flagged for admin review of suspension.";
             await _notificationService.SendInAppNotificationAsync(
                 userId, NotificationType.WarningIssued,
                 "No-Show Warning", reason);

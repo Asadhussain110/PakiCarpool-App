@@ -45,6 +45,14 @@ public class AdminRepository : IAdminRepository
     }
 
     /// <inheritdoc />
+    public async Task<List<Flag>> GetOpenFlagsByReporteeIdAsync(Guid reporteeId)
+    {
+        return await _context.Flags
+            .Where(f => f.ReporteeId == reporteeId && f.Status == FlagStatus.Open)
+            .ToListAsync();
+    }
+
+    /// <inheritdoc />
     public async Task<Flag> CreateFlagAsync(Flag flag, CancellationToken cancellationToken = default)
     {
         _context.Flags.Add(flag);

@@ -233,6 +233,81 @@ public class BookingRepository : IBookingRepository
         });
     }
 
+    /// <inheritdoc />
+    public Task<NoShowRecordingOutcome> RecordNoShowAsync(
+        NoShowLog log,
+        IReadOnlyCollection<BookingStatus> eligibleBookingStatuses,
+        string cancelReason,
+        int trustPenaltyPoints,
+        DateTime utcNow,
+        CancellationToken cancellationToken = default)
+    {
+        return _context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            var bookingId = log.BookingId;
+            if (bookingId is null || bookingId == Guid.Empty)
+                return NoShowRecordingOutcome.NotFound;
+
+            var rideId = await _context.Bookings
+                .AsNoTracking()
+                .Where(b => b.Id == bookingId)
+                .Select(b => (Guid?)b.RideId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (rideId is null)
+                return NoShowRecordingOutcome.NotFound;
+
+            await using var transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
+            // The ride lock serializes concurrent no-show reports for bookings on the
+            // same ride, so the duplicate check below is reliable and the booking
+            // status recheck cannot interleave with another report's cancellation.
+            var ride = await GetRideForUpdateAsync(rideId.Value, cancellationToken);
+            if (ride is null)
+                return NoShowRecordingOutcome.NotFound;
+
+            var booking = await GetFreshBookingAsync(bookingId.Value, cancellationToken);
+            if (booking is null)
+                return NoShowRecordingOutcome.NotFound;
+
+            if (!eligibleBookingStatuses.Contains(booking.Status))
+                return NoShowRecordingOutcome.BookingNotEligible;
+
+            var alreadyReported = await _context.NoShowLogs
+                .AsNoTracking()
+                .AnyAsync(ns => ns.BookingId == bookingId, cancellationToken);
+            if (alreadyReported)
+                return NoShowRecordingOutcome.AlreadyReported;
+
+            _context.NoShowLogs.Add(log);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Deduct the no-show penalty from the offender in the same transaction,
+            // floored at zero like TrustService.DeductPointsAsync.
+            await _context.Users
+                .Where(u => u.Id == log.OffenderId)
+                .ExecuteUpdateAsync(
+                    setters => setters.SetProperty(
+                        u => u.TrustScore,
+                        u => Math.Max(u.TrustScore - trustPenaltyPoints, 0)),
+                    cancellationToken);
+
+            // Cancel the booking conditionally on the eligible statuses rechecked
+            // under the lock, mirroring the seat-freeing semantics of every other
+            // cancellation (occupancy is status-based).
+            var cancelled = await _context.Bookings
+                .Where(b => b.Id == bookingId && eligibleBookingStatuses.Contains(b.Status))
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(b => b.Status, BookingStatus.Cancelled)
+                        .SetProperty(b => b.CancelReason, cancelReason),
+                    cancellationToken);
+            if (cancelled != 1)
+                return NoShowRecordingOutcome.BookingNotEligible;
+
+            await transaction.CommitAsync(cancellationToken);
+            return NoShowRecordingOutcome.Recorded;
+        });
+    }
+
     private Task<Ride?> GetRideForUpdateAsync(Guid rideId, CancellationToken cancellationToken)
     {
         return _context.Rides

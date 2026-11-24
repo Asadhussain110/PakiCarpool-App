@@ -21,9 +21,17 @@ public class NoShowLogConfiguration : IEntityTypeConfiguration<NoShowLog>
         builder.Property(ns => ns.RideId)
             .IsRequired();
 
+        builder.Property(ns => ns.BookingId);
+
         builder.Property(ns => ns.CreatedAt)
             .IsRequired();
 
         builder.HasIndex(ns => ns.OffenderId);
+
+        // One no-show per booking — the database-level guarantee that repeated
+        // or concurrent reports for the same booking cannot double-penalize.
+        // Nullable for legacy rows, which PostgreSQL unique indexes exclude (multiple NULLs allowed).
+        builder.HasIndex(ns => ns.BookingId)
+            .IsUnique();
     }
 }

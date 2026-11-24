@@ -28,6 +28,7 @@ public class PassengerService : IPassengerService
     private readonly ITrustService _trustService;
     private readonly IEmailService _emailService;
     private readonly IHubContext<Microsoft.AspNetCore.SignalR.Hub> _hubContext;
+    private readonly TimeProvider _timeProvider;
 
     public PassengerService(
         IUserRepository userRepository,
@@ -38,7 +39,8 @@ public class PassengerService : IPassengerService
         IFlagService flagService,
         ITrustService trustService,
         IEmailService emailService,
-        IHubContext<Microsoft.AspNetCore.SignalR.Hub> hubContext)
+        IHubContext<Microsoft.AspNetCore.SignalR.Hub> hubContext,
+        TimeProvider? timeProvider = null)
     {
         _userRepository = userRepository;
         _context = context;
@@ -49,6 +51,7 @@ public class PassengerService : IPassengerService
         _trustService = trustService;
         _emailService = emailService;
         _hubContext = hubContext;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -363,7 +366,15 @@ public class PassengerService : IPassengerService
     }
 
     /// <summary>
-    /// Submits a driver no-show claim for administrator review. Claims never trigger automatic penalties.
+    /// Records a driver no-show. Only the booking's passenger may report it, and only when
+    /// all of these hold: the booking is Accepted, the ride is not Cancelled or Completed,
+    /// at least 3 minutes have passed since the booking was accepted, the driver has not
+    /// arrived at the passenger's pickup stop, and the driver is not visibly en route
+    /// (no fresh GPS update within the last 3 minutes) unless the pickup was skipped.
+    /// The log, the -10 trust penalty for the driver, and the booking cancellation are
+    /// persisted atomically; one report per booking is enforced by the database, so
+    /// repeated or concurrent reports never double-penalize. The passenger receives no
+    /// penalty or cancellation log — the driver is the offender.
     /// </summary>
     public async Task<ApiResponse<object>> MarkDriverNoShowAsync(
         Guid passengerId,
@@ -377,34 +388,115 @@ public class PassengerService : IPassengerService
         if (booking is null || booking.PassengerId != passengerId)
             return new ApiResponse<object> { Message = ErrorCodes.NotFound };
 
-        if (booking.Status != BookingStatus.Accepted && booking.Status != BookingStatus.Active)
+        if (booking.Status != BookingStatus.Accepted || booking.AcceptedAt is not DateTime acceptedAt)
             return new ApiResponse<object>
             {
-                Message = "Booking must be Accepted or Active to report a driver no-show."
+                Message = "Booking must be Accepted to report a driver no-show."
             };
 
         var ride = booking.Ride ?? await _rideRepository.GetByIdAsync(booking.RideId, cancellationToken: cancellationToken);
         if (ride is null)
             return new ApiResponse<object> { Message = ErrorCodes.NotFound };
 
-        var pickupStop = await _rideRepository.GetStopByIdAsync(booking.PickupStopId, cancellationToken);
-        if (ride.StartedAt is not DateTime rideStartedAt ||
-            DateTime.UtcNow - rideStartedAt < TimeSpan.FromMinutes(AppConstants.NoShowGraceMinutes) ||
-            pickupStop is null || pickupStop.Status == RideStopStatus.Completed || pickupStop.ArrivedAt.HasValue)
-        {
-            return new ApiResponse<object> { Message = "The pickup is not eligible for a driver no-show claim." };
-        }
+        if (ride.Status is RideStatus.Cancelled or RideStatus.Completed)
+            return new ApiResponse<object> { Message = "Ride is no longer active." };
 
-        var driverProfile = await _userRepository.GetDriverProfileByIdAsync(ride.DriverId, cancellationToken);
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        if (now - acceptedAt < TimeSpan.FromMinutes(AppConstants.NoShowWaitMinutes))
+            return new ApiResponse<object>
+            {
+                Message = $"The {AppConstants.NoShowWaitMinutes}-minute wait since your booking was accepted has not elapsed."
+            };
+
+        var stops = ride.Stops?.ToList()
+            ?? (await _rideRepository.GetByIdAsync(ride.Id, includeStops: true, cancellationToken: cancellationToken))?.Stops?.ToList()
+            ?? [];
+        var pickupStop = stops.FirstOrDefault(s => s.Id == booking.PickupStopId)
+            ?? await _rideRepository.GetStopByIdAsync(booking.PickupStopId, cancellationToken);
+        if (pickupStop is null)
+            return new ApiResponse<object> { Message = ErrorCodes.NotFound };
+
+        if (pickupStop.Status == RideStopStatus.Completed || pickupStop.ArrivedAt.HasValue)
+            return new ApiResponse<object>
+            {
+                Message = "The driver has arrived at your pickup stop."
+            };
+
+        // En-route protection: a driver with fresh GPS who has not skipped this pickup
+        // is still on the way (whether the ride is Posted or Active) — not a no-show.
+        var skippedPickup = stops.Any(s =>
+            s.SequenceOrder > pickupStop.SequenceOrder &&
+            s.Status == RideStopStatus.Completed);
+        var driverLocation = await _rideRepository.GetDriverLocationAsync(ride.DriverId, ride.Id);
+        var gpsIsFresh = driverLocation is not null &&
+            driverLocation.RecordedAt >= now.AddMinutes(-AppConstants.NoShowGpsFreshnessMinutes);
+        if (gpsIsFresh && !skippedPickup)
+            return new ApiResponse<object>
+            {
+                Message = "The driver appears to be en route to your pickup stop."
+            };
+
+        var driverProfile = ride.Driver
+            ?? await _userRepository.GetDriverProfileByIdAsync(ride.DriverId, cancellationToken);
         if (driverProfile is null)
             return new ApiResponse<object> { Message = "Driver profile not found." };
 
-        return await _flagService.CreateFlagAsync(passengerId, new FlagDto
+        var log = new NoShowLog
         {
-            ReporteeId = driverProfile.UserId,
+            Id = Guid.NewGuid(),
+            ReporterId = passengerId,
+            OffenderId = driverProfile.UserId,
             RideId = ride.Id,
-            Reason = $"Driver no-show claim for booking {booking.Id} at pickup stop {pickupStop.Name}."
-        }, cancellationToken);
+            BookingId = booking.Id,
+            CreatedAt = now
+        };
+
+        var outcome = await _bookingRepository.RecordNoShowAsync(
+            log,
+            [BookingStatus.Accepted],
+            AppConstants.NoShowDriverCancelReason,
+            AppConstants.NoShowPenalty,
+            now,
+            cancellationToken);
+
+        if (outcome != NoShowRecordingOutcome.Recorded)
+        {
+            var message = outcome switch
+            {
+                NoShowRecordingOutcome.AlreadyReported =>
+                    "A no-show has already been recorded for this booking.",
+                NoShowRecordingOutcome.BookingNotEligible =>
+                    "Booking is no longer eligible for a driver no-show report.",
+                _ => ErrorCodes.NotFound
+            };
+            return new ApiResponse<object> { Message = message };
+        }
+
+        // Post-commit side effects: free the seat by the same status-based occupancy
+        // and group-removal semantics as every other booking cancellation — no passenger
+        // penalty and no passenger cancellation log, because the driver is the offender.
+        // Only this booking is cancelled; the ride and other passengers are untouched.
+        await _notificationService.RemovePassengerFromRideGroupsAsync(booking.RideId, booking.PassengerId);
+
+        await _notificationService.SendInAppNotificationAsync(
+            passengerId,
+            NotificationType.BookingAutoCancelled,
+            "Booking Cancelled",
+            "Your booking was cancelled because the driver did not show at your pickup stop.");
+
+        await _notificationService.SendInAppNotificationAsync(
+            driverProfile.UserId,
+            NotificationType.NoShowRecorded,
+            "No-Show Recorded",
+            "You were recorded as a no-show at a passenger's pickup stop. Repeated no-shows lead to admin review of your account.");
+        var driverUser = await _userRepository.GetByIdAsync(driverProfile.UserId, cancellationToken);
+        if (driverUser is not null)
+            await _emailService.SendNoShowEmailAsync(driverUser.Email, driverUser.FullName);
+
+        await _trustService.CheckThresholdsAsync(driverProfile.UserId);
+
+        return ApiResponse<object>.SuccessMessage(
+            "Driver no-show recorded. Your booking has been cancelled.");
     }
 
     private static RideResponseDto MapRideToResponseDto(Ride ride, DriverLocation? driverLocation = null)

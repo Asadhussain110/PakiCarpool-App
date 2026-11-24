@@ -38,7 +38,10 @@ public interface IPassengerService
     Task<ApiResponse<ActiveBookingResponseDto>> GetActiveBookingAsync(Guid passengerId);
 
     /// <summary>
-    /// Reports driver no-show after 3-minute wait. Deducts 10 trust points from driver.
+    /// Records a driver no-show after the 3-minute wait from booking acceptance, when the
+    /// driver has not arrived at the pickup stop and is not visibly en route. Persists the
+    /// NoShowLog, deducts 10 trust points from the driver, and cancels the booking atomically.
+    /// The passenger receives no penalty. One report per booking.
     /// </summary>
     Task<ApiResponse<object>> MarkDriverNoShowAsync(Guid passengerId, Guid bookingId, CancellationToken cancellationToken = default);
 }

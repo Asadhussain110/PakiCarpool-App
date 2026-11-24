@@ -619,9 +619,11 @@ public class UserRepository : IUserRepository
     }
 
     /// <inheritdoc />
-    public async Task CreateNoShowLogAsync(NoShowLog log)
+    public async Task<NoShowLog?> GetLatestNoShowByOffenderAsync(Guid offenderId)
     {
-        _context.NoShowLogs.Add(log);
-        await _context.SaveChangesAsync();
+        return await _context.NoShowLogs
+            .Where(ns => ns.OffenderId == offenderId)
+            .OrderByDescending(ns => ns.CreatedAt)
+            .FirstOrDefaultAsync();
     }
 }
