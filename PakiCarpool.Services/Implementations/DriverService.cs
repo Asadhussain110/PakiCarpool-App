@@ -959,6 +959,7 @@ public class DriverService : IDriverService
         {
             Id = ride.Id,
             DriverId = profile.Id,
+            DriverUserId = profile.UserId,
             DriverName = user?.FullName ?? "Unknown",
             DriverRating = profile.AverageRating,
             CarMake = ride.Car?.Make ?? string.Empty,

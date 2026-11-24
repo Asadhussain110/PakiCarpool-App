@@ -249,7 +249,13 @@ public class DriverLocationDto
 public class RideResponseDto
 {
     public Guid Id { get; set; }
+
+    /// <summary>Driver profile identifier (DriverProfiles.Id).</summary>
     public Guid DriverId { get; set; }
+
+    /// <summary>Driver account identifier (Users.Id). Use this wherever a user ID is expected, e.g. the rating rateeId.</summary>
+    public Guid DriverUserId { get; set; }
+
     public string DriverName { get; set; } = string.Empty;
     public decimal DriverRating { get; set; }
     public string? DriverPhotoUrl { get; set; }

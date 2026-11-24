@@ -422,6 +422,7 @@ public class PassengerService : IPassengerService
         {
             Id = ride.Id,
             DriverId = ride.DriverId,
+            DriverUserId = ride.Driver?.UserId ?? Guid.Empty,
             DriverName = driverName,
             DriverRating = driverRating,
             DriverPhotoUrl = driverPhotoUrl,

@@ -596,6 +596,7 @@ public class AdminService : IAdminService
         {
             Id = ride.Id,
             DriverId = ride.DriverId,
+            DriverUserId = ride.Driver?.UserId ?? Guid.Empty,
             DriverName = ride.Driver?.User?.FullName ?? "Unknown",
             DriverRating = ride.Driver?.AverageRating ?? 0m,
             CarMake = ride.Car?.Make ?? string.Empty,

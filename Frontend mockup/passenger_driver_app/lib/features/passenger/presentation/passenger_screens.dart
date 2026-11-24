@@ -1342,7 +1342,9 @@ class _ActiveBookingScreenState extends ConsumerState<ActiveBookingScreen> {
 
   Future<void> _openFeedback() async {
     final rideId = _booking?['rideId']?.toString();
-    final rateeId = _ride?['driverId']?.toString();
+    // The rating API expects the driver's user ID, not the ride DTO's
+    // driverId (which is the driver-profile ID).
+    final rateeId = _ride?['driverUserId']?.toString();
     if (rideId == null || rateeId == null || !mounted) return;
     context.push('/feedback?rideId=$rideId&rateeId=$rateeId&role=Passenger');
   }
