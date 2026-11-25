@@ -66,6 +66,45 @@ void main() {
     expect(find.text('Passenger home'), findsOneWidget);
     expect(container.read(appSessionProvider)?.fullName, 'Amina Khan');
   });
+
+  testWidgets('email OTP screen enforces the resend cooldown', (tester) async {
+    final repository = _FakeAuthRepository();
+    final container = ProviderContainer(
+      overrides: [authRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+    final router = GoRouter(
+      initialLocation: '/verify-email?email=amina@example.com',
+      routes: [
+        GoRoute(
+          path: '/login',
+          builder: (context, state) => const Scaffold(body: Text('Login')),
+        ),
+        GoRoute(
+          path: '/verify-email',
+          builder: (context, state) =>
+              EmailOtpScreen(email: state.uri.queryParameters['email'] ?? ''),
+        ),
+      ],
+    );
+    addTearDown(router.dispose);
+    await tester.pumpWidget(_testApp(container, router));
+
+    // The screen opens mid-cooldown: resending is not offered yet.
+    expect(find.textContaining('request a new code in 60 seconds'), findsOneWidget);
+    expect(find.text('Resend code'), findsNothing);
+
+    await tester.pump(const Duration(seconds: 60));
+    expect(find.text('Resend code'), findsOneWidget);
+
+    await tester.tap(find.text('Resend code'));
+    await tester.pumpAndSettle();
+
+    expect(repository.resendCalls, 1);
+    // A successful resend restarts the cooldown.
+    expect(find.textContaining('request a new code in 60 seconds'), findsOneWidget);
+    expect(find.text('Resend code'), findsNothing);
+  });
 }
 
 GoRouter _testRouter() => GoRouter(
@@ -118,6 +157,13 @@ class _FakeAuthRepository implements AuthRepository {
     required String email,
     required String otp,
   }) async {}
+
+  @override
+  Future<void> resendEmailVerification({required String email}) async {
+    resendCalls++;
+  }
+
+  int resendCalls = 0;
 
   @override
   Future<void> forgotPassword({required String email}) async {}

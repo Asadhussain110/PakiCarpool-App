@@ -17,6 +17,11 @@ public class User
     public bool IsEmailVerified { get; set; }
     public string? EmailOtp { get; set; }
     public DateTime? EmailOtpExpiry { get; set; }
+    public int EmailOtpAttempts { get; set; }
+    public DateTime? EmailOtpLockedUntil { get; set; }
+    public DateTime? EmailOtpLastSentAt { get; set; }
+    public int EmailOtpResendCount { get; set; }
+    public DateTime? EmailOtpResendWindowStart { get; set; }
     public string? PasswordResetToken { get; set; }
     public DateTime? PasswordResetTokenExpiry { get; set; }
     public int PasswordResetAttempts { get; set; }

@@ -77,6 +77,14 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
         builder.Property(u => u.EmailOtp)
             .HasMaxLength(500);
 
+        builder.Property(u => u.EmailOtpAttempts)
+            .IsRequired()
+            .HasDefaultValue(0);
+
+        builder.Property(u => u.EmailOtpResendCount)
+            .IsRequired()
+            .HasDefaultValue(0);
+
         builder.Property(u => u.CreatedAt)
             .IsRequired();
     }

@@ -44,6 +44,13 @@ public class VerifyEmailDto
     public string Otp { get; set; } = string.Empty;
 }
 
+public class ResendEmailVerificationDto
+{
+    [Required]
+    [EmailAddress]
+    public string Email { get; set; } = string.Empty;
+}
+
 public class ForgotPasswordDto
 {
     [Required]

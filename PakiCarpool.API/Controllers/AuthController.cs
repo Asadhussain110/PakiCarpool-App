@@ -58,6 +58,18 @@ public sealed class AuthController : ApiControllerBase
         return FromResponse(await _authService.VerifyEmailAsync(dto));
     }
 
+    /// <summary>POST /auth/verify-email/resend — Resend the email verification OTP.</summary>
+    [HttpPost("verify-email/resend")]
+    [AllowAnonymous]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ResendEmailVerification([FromBody] ResendEmailVerificationDto dto)
+    {
+        if (!ModelState.IsValid)
+            return InvalidModel();
+
+        return FromResponse(await _authService.ResendEmailOtpAsync(dto));
+    }
+
     /// <summary>POST /auth/login — Email/password login.</summary>
     [HttpPost("login")]
     [AllowAnonymous]

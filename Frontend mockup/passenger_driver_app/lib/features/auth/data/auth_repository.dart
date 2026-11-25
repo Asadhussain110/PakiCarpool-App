@@ -26,6 +26,8 @@ abstract interface class AuthRepository {
 
   Future<void> verifyEmail({required String email, required String otp});
 
+  Future<void> resendEmailVerification({required String email});
+
   Future<void> forgotPassword({required String email});
 
   Future<void> resetPassword({
@@ -89,6 +91,16 @@ class ApiAuthRepository implements AuthRepository {
       () => _apiClient.post(
         'auth/verify-email',
         data: {'email': email, 'otp': otp},
+      ),
+    );
+  }
+
+  @override
+  Future<void> resendEmailVerification({required String email}) async {
+    await _send(
+      () => _apiClient.post(
+        'auth/verify-email/resend',
+        data: {'email': email},
       ),
     );
   }

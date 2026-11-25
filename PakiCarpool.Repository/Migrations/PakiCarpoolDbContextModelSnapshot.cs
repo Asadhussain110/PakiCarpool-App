@@ -692,7 +692,26 @@ namespace PakiCarpool.Repository.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
+                    b.Property<int>("EmailOtpAttempts")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
                     b.Property<DateTime?>("EmailOtpExpiry")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("EmailOtpLastSentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("EmailOtpLockedUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("EmailOtpResendCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<DateTime?>("EmailOtpResendWindowStart")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("FailedLoginCount")

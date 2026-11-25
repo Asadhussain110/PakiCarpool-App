@@ -1046,11 +1046,70 @@ class _EmailOtpScreenState extends ConsumerState<EmailOtpScreen> {
   final _code = TextEditingController();
   bool _submitting = false;
   String? _errorMessage;
+  bool _resending = false;
+  int _resendCooldown = 60;
+  Timer? _resendTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    // The verification code was just sent during registration, so the resend
+    // cooldown starts with the screen.
+    _resendCooldown = 60;
+    _resendTimer = _createResendTimer();
+  }
 
   @override
   void dispose() {
+    _resendTimer?.cancel();
     _code.dispose();
     super.dispose();
+  }
+
+  Timer _createResendTimer() =>
+      Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (!mounted) {
+          timer.cancel();
+          return;
+        }
+        if (_resendCooldown <= 0) {
+          timer.cancel();
+        } else {
+          setState(() => _resendCooldown--);
+        }
+      });
+
+  void _restartResendCountdown() {
+    _resendTimer?.cancel();
+    setState(() => _resendCooldown = 60);
+    _resendTimer = _createResendTimer();
+  }
+
+  Future<void> _resend() async {
+    if (_resendCooldown > 0 || _resending) {
+      return;
+    }
+    setState(() {
+      _resending = true;
+      _errorMessage = null;
+    });
+    try {
+      await ref
+          .read(authRepositoryProvider)
+          .resendEmailVerification(email: widget.email);
+      if (mounted) {
+        setState(() => _errorMessage = null);
+        _restartResendCountdown();
+      }
+    } on ApiFailure catch (failure) {
+      if (mounted) setState(() => _errorMessage = failure.message);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _errorMessage = 'Could not resend the code. Try again.');
+      }
+    } finally {
+      if (mounted) setState(() => _resending = false);
+    }
   }
 
   Future<void> _verify() async {
@@ -1114,10 +1173,24 @@ class _EmailOtpScreenState extends ConsumerState<EmailOtpScreen> {
               decoration: const InputDecoration(hintText: '000000'),
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Codes expire after 10 minutes. Code resend is unavailable until the API provides a resend endpoint.',
-              style: TextStyle(color: RouteAtlasColors.muted, height: 1.4),
-            ),
+            if (_resendCooldown > 0)
+              Text(
+                'Codes expire after 10 minutes. You can request a new code in '
+                '$_resendCooldown seconds.',
+                style: const TextStyle(color: RouteAtlasColors.muted, height: 1.4),
+              )
+            else
+              TextButton.icon(
+                onPressed: _resending ? null : _resend,
+                icon: _resending
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh),
+                label: const Text('Resend code'),
+              ),
             if (_errorMessage != null) ...[
               const SizedBox(height: 14),
               _MessageBanner(message: _errorMessage!, isError: true),

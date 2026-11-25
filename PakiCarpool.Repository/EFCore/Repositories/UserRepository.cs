@@ -391,6 +391,122 @@ public class UserRepository : IUserRepository
         });
     }
 
+    public async Task<bool> TryIssueEmailOtpAsync(
+        Guid userId,
+        string codeHash,
+        DateTime now,
+        DateTime expiresAt,
+        TimeSpan resendCooldown,
+        TimeSpan resendWindow,
+        int resendLimit,
+        CancellationToken cancellationToken = default)
+    {
+        var cooldownStart = now - resendCooldown;
+        var windowStart = now - resendWindow;
+        var updated = await _context.Users
+            .Where(user =>
+                user.Id == userId &&
+                user.Role != UserRole.Admin &&
+                user.IsActive &&
+                !user.IsEmailVerified &&
+                (user.EmailOtpLockedUntil == null || user.EmailOtpLockedUntil <= now) &&
+                (user.EmailOtpLastSentAt == null || user.EmailOtpLastSentAt <= cooldownStart) &&
+                (user.EmailOtpResendWindowStart == null ||
+                 user.EmailOtpResendWindowStart <= windowStart ||
+                 user.EmailOtpResendCount < resendLimit))
+            .ExecuteUpdateAsync(update => update
+                .SetProperty(user => user.EmailOtp, codeHash)
+                .SetProperty(user => user.EmailOtpExpiry, expiresAt)
+                .SetProperty(user => user.EmailOtpLastSentAt, now)
+                // The attempt counter resets only when a lock has expired — a resend
+                // must never be a way around an active or lingering lock.
+                .SetProperty(
+                    user => user.EmailOtpAttempts,
+                    user => user.EmailOtpLockedUntil != null ? 0 : user.EmailOtpAttempts)
+                .SetProperty(user => user.EmailOtpLockedUntil, (DateTime?)null)
+                .SetProperty(
+                    user => user.EmailOtpResendCount,
+                    user => user.EmailOtpResendWindowStart == null ||
+                            user.EmailOtpResendWindowStart <= windowStart
+                        ? 1
+                        : user.EmailOtpResendCount + 1)
+                .SetProperty(
+                    user => user.EmailOtpResendWindowStart,
+                    user => user.EmailOtpResendWindowStart == null ||
+                            user.EmailOtpResendWindowStart <= windowStart
+                        ? now
+                        : user.EmailOtpResendWindowStart),
+                cancellationToken);
+
+        return updated == 1;
+    }
+
+    public async Task<bool> IncrementEmailOtpAttemptsAsync(
+        Guid userId,
+        DateTime now,
+        int attemptLimit,
+        DateTime lockoutUntil,
+        CancellationToken cancellationToken = default)
+    {
+        var updated = await _context.Users
+            .Where(user =>
+                user.Id == userId &&
+                user.Role != UserRole.Admin &&
+                user.EmailOtp != null &&
+                user.EmailOtpExpiry > now &&
+                user.EmailOtpLockedUntil == null &&
+                user.EmailOtpAttempts < attemptLimit)
+            .ExecuteUpdateAsync(update => update
+                .SetProperty(
+                    user => user.EmailOtpAttempts,
+                    user => user.EmailOtpAttempts + 1)
+                .SetProperty(
+                    user => user.EmailOtpLockedUntil,
+                    user => user.EmailOtpAttempts + 1 >= attemptLimit
+                        ? lockoutUntil
+                        : user.EmailOtpLockedUntil)
+                .SetProperty(
+                    user => user.EmailOtp,
+                    user => user.EmailOtpAttempts + 1 >= attemptLimit
+                        ? null
+                        : user.EmailOtp)
+                .SetProperty(
+                    user => user.EmailOtpExpiry,
+                    user => user.EmailOtpAttempts + 1 >= attemptLimit
+                        ? null
+                        : user.EmailOtpExpiry),
+                cancellationToken);
+
+        return updated == 1;
+    }
+
+    public async Task<bool> DeleteUnverifiedUserAsync(Guid userId, CancellationToken cancellationToken = default)
+    {
+        var strategy = _context.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
+
+            await _context.DriverProfiles
+                .Where(profile => profile.UserId == userId)
+                .ExecuteDeleteAsync(cancellationToken);
+
+            var deleted = await _context.Users
+                .Where(user => user.Id == userId && !user.IsEmailVerified)
+                .ExecuteDeleteAsync(cancellationToken);
+
+            if (deleted != 1)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return true;
+        });
+    }
+
     /// <inheritdoc />
     public async Task<(List<User> Items, int TotalCount)> GetAllPaginatedAsync(int page, int pageSize)
     {

@@ -45,6 +45,12 @@ public class AuthService : IAuthService
     private const int PasswordResetCodeAttemptLimit = 5;
     private const int PasswordResetCodeRequestLimit = 3;
     private static readonly TimeSpan PasswordResetCodeRequestWindow = TimeSpan.FromMinutes(15);
+    private const int EmailOtpExpiryMinutesDefault = 10;
+    private const int EmailOtpAttemptLimitDefault = 3;
+    private const int EmailOtpLockoutMinutesDefault = 15;
+    private const int EmailOtpResendCooldownSecondsDefault = 60;
+    private const int EmailOtpResendLimitDefault = 3;
+    private static readonly TimeSpan EmailOtpResendWindowDefault = TimeSpan.FromMinutes(15);
 
     public AuthService(
         IUserRepository userRepository,
@@ -57,7 +63,8 @@ public class AuthService : IAuthService
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         IHCaptchaService hCaptchaService,
-        ILogger<AuthService> logger)
+        ILogger<AuthService> logger,
+        TimeProvider? timeProvider = null)
     {
         _userRepository = userRepository;
         _userSessionService = userSessionService;
@@ -70,7 +77,27 @@ public class AuthService : IAuthService
         _configuration = configuration;
         _hCaptchaService = hCaptchaService;
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
+
+    private readonly TimeProvider _timeProvider;
+
+    private int EmailOtpAttemptLimit =>
+        _configuration.GetValue("Auth:EmailOtpAttemptLimit", EmailOtpAttemptLimitDefault);
+
+    private int EmailOtpLockoutMinutes =>
+        _configuration.GetValue("Auth:EmailOtpLockoutMinutes", EmailOtpLockoutMinutesDefault);
+
+    private TimeSpan EmailOtpResendCooldown =>
+        TimeSpan.FromSeconds(
+            _configuration.GetValue("Auth:EmailOtpResendCooldownSeconds", EmailOtpResendCooldownSecondsDefault));
+
+    private int EmailOtpResendLimit =>
+        _configuration.GetValue("Auth:EmailOtpResendLimit", EmailOtpResendLimitDefault);
+
+    private TimeSpan EmailOtpResendWindow =>
+        TimeSpan.FromMinutes(
+            _configuration.GetValue("Auth:EmailOtpResendWindowMinutes", (int)EmailOtpResendWindowDefault.TotalMinutes));
 
     // ──────────────────────────────────────────────────────────────────────────
     // REGISTRATION
@@ -92,6 +119,12 @@ public class AuthService : IAuthService
             };
         }
 
+        var passwordMessage = PasswordPolicy.GetValidationMessage(dto.Password);
+        if (passwordMessage is not null)
+        {
+            return ApiResponse<object>.Failure(ErrorCodes.ValidationError, passwordMessage);
+        }
+
         if (await _userRepository.EmailExistsAsync(dto.Email))
         {
             return new ApiResponse<object>
@@ -100,6 +133,7 @@ public class AuthService : IAuthService
             };
         }
 
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
         var otp = GenerateOtp();
         var user = new User
         {
@@ -110,7 +144,13 @@ public class AuthService : IAuthService
             Role = dto.Role,
             IsEmailVerified = false,
             EmailOtp = HashOtp(otp),
-            EmailOtpExpiry = DateTime.UtcNow.AddMinutes(_configuration.GetValue<int>("Auth:EmailOtpExpiryMinutes")),
+            EmailOtpExpiry = now.AddMinutes(
+                _configuration.GetValue("Auth:EmailOtpExpiryMinutes", EmailOtpExpiryMinutesDefault)),
+            EmailOtpAttempts = 0,
+            // Records when the initial code was sent so the resend cooldown applies to it;
+            // the initial registration code itself is never counted as a resend.
+            EmailOtpLastSentAt = now,
+            EmailOtpResendCount = 0,
             IsActive = true,
             IsSuspended = false,
             TrustScore = AppConstants.TrustScoreInitial,
@@ -139,7 +179,37 @@ public class AuthService : IAuthService
             return DuplicateEmail<object>();
         }
 
-        await _emailService.SendEmailOtpAsync(createdUser.Email, createdUser.FullName, otp);
+        // SMTP failure must not strand an unverified account with no deliverable code and a
+        // blocked email. The smaller and safer recovery is a clean rollback: the just-created
+        // unverified user (and its driver profile) is deleted so registering again with the
+        // same email works. The user then retries registration rather than depending on a
+        // resend for an account whose code email never arrived.
+        try
+        {
+            await _emailService.SendEmailOtpAsync(createdUser.Email, createdUser.FullName, otp);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                "Verification email delivery failed during registration for user {UserId} ({ExceptionType}).",
+                createdUser.Id,
+                exception.GetType().Name);
+            try
+            {
+                await _userRepository.DeleteUnverifiedUserAsync(createdUser.Id);
+            }
+            catch (Exception rollbackException)
+            {
+                _logger.LogError(
+                    "Rollback of unverified user {UserId} failed after email delivery failure ({ExceptionType}).",
+                    createdUser.Id,
+                    rollbackException.GetType().Name);
+            }
+
+            return ApiResponse<object>.Failure(
+                ErrorCodes.InternalError,
+                "Registration could not be completed. Please try again.");
+        }
 
         return ApiResponse<object>.SuccessMessage("Check your email for the verification code.");
     }
@@ -150,7 +220,9 @@ public class AuthService : IAuthService
 
     /// <summary>
     /// Verifies the 6-digit OTP. Sets IsEmailVerified = true and clears OTP fields on success.
-    /// Driver accounts receive a liveness-pending partial token after verification.
+    /// Wrong codes are counted per account; reaching the configured attempt limit locks
+    /// verification for the cooldown and invalidates the current code. Driver accounts
+    /// receive a liveness-pending partial token after verification.
     /// </summary>
     public async Task<ApiResponse<object>> VerifyEmailAsync(VerifyEmailDto dto)
     {
@@ -164,20 +236,41 @@ public class AuthService : IAuthService
         if (user.IsEmailVerified)
             return ApiResponse<object>.SuccessMessage("Email is already verified.");
 
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+
+        // While the account is OTP-locked, correct and wrong codes get the same generic
+        // response — no remaining lock time is revealed to an unverified caller.
+        if (user.EmailOtpLockedUntil is not null && user.EmailOtpLockedUntil.Value > now)
+            return EmailOtpLocked<object>();
+
         if (user.EmailOtp is null || user.EmailOtpExpiry is null)
             return new ApiResponse<object> { Message = "No pending OTP found. Please request a new one." };
 
-        if (DateTime.UtcNow > user.EmailOtpExpiry)
+        if (now > user.EmailOtpExpiry)
             return new ApiResponse<object> { Message = "OTP has expired. Please request a new one." };
 
         var incomingHash = HashOtp(dto.Otp);
-        if (!string.Equals(incomingHash, user.EmailOtp, StringComparison.Ordinal))
-            return new ApiResponse<object> { Message = "Invalid verification code." };
+        if (!FixedTimeHashEquals(incomingHash, user.EmailOtp))
+        {
+            var lockoutUntil = now.AddMinutes(EmailOtpLockoutMinutes);
+            await _userRepository.IncrementEmailOtpAttemptsAsync(
+                user.Id, now, EmailOtpAttemptLimit, lockoutUntil);
+
+            return user.EmailOtpAttempts + 1 >= EmailOtpAttemptLimit
+                ? EmailOtpLocked<object>()
+                : new ApiResponse<object> { Message = "Invalid verification code." };
+        }
 
         await ResetLoginFailuresAsync(user);
         user.IsEmailVerified = true;
         user.EmailOtp = null;
         user.EmailOtpExpiry = null;
+        // A successful verification resets the per-account OTP attempt counter.
+        user.EmailOtpAttempts = 0;
+        user.EmailOtpLockedUntil = null;
+        user.EmailOtpLastSentAt = null;
+        user.EmailOtpResendCount = 0;
+        user.EmailOtpResendWindowStart = null;
         await _userRepository.UpdateAsync(user);
 
         if (user.Role == UserRole.Driver)
@@ -198,6 +291,66 @@ public class AuthService : IAuthService
 
         return ApiResponse<object>.SuccessMessage("Email verified successfully.");
     }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // EMAIL OTP RESEND
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sends a replacement email-verification OTP. The per-account resend cooldown,
+    /// per-window resend limit, and OTP lock are enforced atomically per account, and
+    /// issuing the new code invalidates the previous one. The response — success flag,
+    /// status, and message — is identical whether or not the email belongs to a
+    /// registered, unverified, unlocked account, so account existence is never revealed.
+    /// </summary>
+    public async Task<ApiResponse<object>> ResendEmailOtpAsync(ResendEmailVerificationDto dto)
+    {
+        const string responseMessage = "If an account exists for this email, a new verification code has been sent.";
+        var user = await _userRepository.GetByEmailAsync(dto.Email);
+        if (user is null)
+            return ApiResponse<object>.SuccessMessage(responseMessage);
+
+        // Verified, admin, and inactive accounts get the same response as unknown emails.
+        if (user.Role == UserRole.Admin || user.IsEmailVerified || !user.IsActive)
+            return ApiResponse<object>.SuccessMessage(responseMessage);
+
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var otp = GenerateOtp();
+        var issued = await _userRepository.TryIssueEmailOtpAsync(
+            user.Id,
+            HashOtp(otp),
+            now,
+            now.AddMinutes(
+                _configuration.GetValue("Auth:EmailOtpExpiryMinutes", EmailOtpExpiryMinutesDefault)),
+            EmailOtpResendCooldown,
+            EmailOtpResendWindow,
+            EmailOtpResendLimit);
+        if (!issued)
+            // Locked, cooling down, or over the window limit — same generic response.
+            return ApiResponse<object>.SuccessMessage(responseMessage);
+
+        try
+        {
+            await _emailService.SendEmailOtpAsync(user.Email, user.FullName, otp);
+        }
+        catch (Exception exception)
+        {
+            // Delivery failure is logged without ever logging the code. The response stays
+            // identical so account existence is not revealed through error behavior; the
+            // stored code remains valid and the user can retry after the cooldown.
+            _logger.LogError(
+                "Verification email resend delivery failed for user {UserId} ({ExceptionType}).",
+                user.Id,
+                exception.GetType().Name);
+        }
+
+        return ApiResponse<object>.SuccessMessage(responseMessage);
+    }
+
+    private static ApiResponse<T> EmailOtpLocked<T>()
+        => ApiResponse<T>.Failure(
+            ErrorCodes.ValidationError,
+            "Too many invalid verification attempts. Try again later.");
 
     // ──────────────────────────────────────────────────────────────────────────
     // EMAIL/PASSWORD LOGIN
@@ -369,6 +522,13 @@ public class AuthService : IAuthService
     public async Task<ApiResponse<object>> ResetPasswordAsync(ResetPasswordDto dto)
     {
         const string invalidMessage = "The reset code is invalid or expired. Request a new code and try again.";
+
+        var passwordMessage = PasswordPolicy.GetValidationMessage(dto.NewPassword);
+        if (passwordMessage is not null)
+        {
+            return ApiResponse<object>.Failure(ErrorCodes.ValidationError, passwordMessage);
+        }
+
         var user = await _userRepository.GetByEmailAsync(dto.Email);
         if (user is null || user.Role == UserRole.Admin || !user.IsActive ||
             user.PasswordResetToken is null ||
@@ -441,6 +601,13 @@ public class AuthService : IAuthService
     public async Task<ApiResponse<object>> ResetAdminPasswordAsync(AdminResetPasswordDto dto)
     {
         const string invalidMessage = "The reset request is invalid or expired. Request a new code and try again.";
+
+        var passwordMessage = PasswordPolicy.GetValidationMessage(dto.NewPassword);
+        if (passwordMessage is not null)
+        {
+            return ApiResponse<object>.Failure(ErrorCodes.ValidationError, passwordMessage);
+        }
+
         var user = await _userRepository.GetByEmailAsync(dto.Email);
         if (user is null || user.Role != UserRole.Admin || !user.IsActive ||
             user.AdminPasswordResetCodeHash is null ||

@@ -117,6 +117,42 @@ public interface IUserRepository
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Atomically issues a replacement email-verification OTP for an unverified, unlocked account.
+    /// Enforces the resend cooldown, the per-window resend limit, and the OTP lock per account,
+    /// invalidates the previous code, and resets the attempt counter only when a lock has expired.
+    /// Returns false when the account is locked, the cooldown is active, or the window limit is hit.
+    /// </summary>
+    Task<bool> TryIssueEmailOtpAsync(
+        Guid userId,
+        string codeHash,
+        DateTime now,
+        DateTime expiresAt,
+        TimeSpan resendCooldown,
+        TimeSpan resendWindow,
+        int resendLimit,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically counts a wrong email-verification OTP attempt for the account.
+    /// When the attempt limit is reached, the account is locked until the supplied
+    /// lockout instant and the current code is invalidated.
+    /// </summary>
+    Task<bool> IncrementEmailOtpAttemptsAsync(
+        Guid userId,
+        DateTime now,
+        int attemptLimit,
+        DateTime lockoutUntil,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes a user that was created but never email-verified, together with its
+    /// driver profile. Used to roll back registration when the verification email
+    /// cannot be sent so that registering again with the same email works.
+    /// Returns false when no unverified user row was deleted.
+    /// </summary>
+    Task<bool> DeleteUnverifiedUserAsync(Guid userId, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Gets all users with pagination.
     /// </summary>
     Task<(List<User> Items, int TotalCount)> GetAllPaginatedAsync(int page, int pageSize);

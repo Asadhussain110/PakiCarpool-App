@@ -22,6 +22,13 @@ public interface IAuthService
     Task<ApiResponse<object>> VerifyEmailAsync(VerifyEmailDto dto);
 
     /// <summary>
+    /// Sends a replacement email-verification OTP. Enforces a per-account resend cooldown,
+    /// a per-window resend limit, and the per-account OTP lock; a resend invalidates the
+    /// previous code. The response is identical whether or not the email is registered.
+    /// </summary>
+    Task<ApiResponse<object>> ResendEmailOtpAsync(ResendEmailVerificationDto dto);
+
+    /// <summary>
     /// Authenticates user with email/password. Handles lockout, captcha, and liveness pending for drivers.
     /// Returns a partial token for drivers and a token pair for passengers.
     /// </summary>
