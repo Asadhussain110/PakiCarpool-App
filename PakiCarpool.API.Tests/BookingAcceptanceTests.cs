@@ -204,6 +204,7 @@ public sealed class BookingAcceptanceTests
                 Trust.Object,
                 Email.Object,
                 new AesEncryptionHelper(configuration),
+                new Mock<IStorageService>().Object,
                 HubContext.Object,
                 new FixedTimeProvider(Now));
         }

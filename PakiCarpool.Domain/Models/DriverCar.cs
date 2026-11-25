@@ -20,6 +20,8 @@ public class DriverCar
     public string RegDocPath { get; set; } = string.Empty;
     public string? RejectionReason { get; set; }
     public DateTime? ApprovedAt { get; set; }
+    public Guid? ReplacedByCarId { get; set; }
+    public Guid? ReplacesCarId { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public DriverProfile Driver { get; set; } = null!;

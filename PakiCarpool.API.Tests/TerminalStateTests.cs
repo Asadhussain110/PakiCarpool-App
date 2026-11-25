@@ -244,6 +244,7 @@ public sealed class TerminalStateTests
                 Trust.Object,
                 Email.Object,
                 new AesEncryptionHelper(configuration),
+                new Mock<IStorageService>().Object,
                 HubContext.Object);
             PassengerService = new PassengerService(
                 Users.Object,

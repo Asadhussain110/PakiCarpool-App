@@ -113,6 +113,40 @@ public sealed class SupabaseStorageService : IStorageService
         return $"private://driver-registration-documents/{objectPath}";
     }
 
+    public async Task<string> UploadCarPhotoAsync(
+        Guid driverId,
+        byte[] content,
+        string contentType,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateImage(content, contentType);
+        await _initialization.Value.WaitAsync(cancellationToken);
+
+        var extension = contentType == "image/jpeg" ? "jpg" : "png";
+        var objectPath = $"{driverId:D}/{Guid.NewGuid():N}.{extension}";
+        var bucket = _client.Storage.From("driver-cars");
+        await bucket.Upload(content, objectPath, new Supabase.Storage.FileOptions { Upsert = false })
+            .WaitAsync(cancellationToken);
+
+        return $"private://driver-cars/{objectPath}";
+    }
+
+    public string GetCarPhotoUrl(string photoPath)
+    {
+        const string prefix = "private://driver-cars/";
+        if (!photoPath.StartsWith(prefix, StringComparison.Ordinal))
+            throw new InvalidOperationException("Car photo storage key is invalid.");
+
+        var objectPath = photoPath[prefix.Length..];
+        if (objectPath.Split('/').Any(segment =>
+                string.IsNullOrWhiteSpace(segment) || segment is "." or ".."))
+        {
+            throw new InvalidOperationException("Car photo storage key is invalid.");
+        }
+
+        return _client.Storage.From("driver-cars").GetPublicUrl(objectPath, null, null);
+    }
+
     public async Task<string> CreatePrivateCarDocumentSignedUrlAsync(
         string documentKey,
         CancellationToken cancellationToken = default)

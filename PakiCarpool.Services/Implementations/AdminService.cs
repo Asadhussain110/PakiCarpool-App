@@ -228,13 +228,16 @@ public class AdminService : IAdminService
         if (car is null)
             return new ApiResponse<object> { Message = ErrorCodes.NotFound };
 
-        if (car.Status != CarStatus.Pending)
+        var outcome = await _userRepository.ApproveDriverCarAsync(carId, DateTime.UtcNow);
+        if (outcome == CarApprovalOutcome.NotPending)
             return new ApiResponse<object> { Message = "Only pending cars can be approved." };
-
-        car.Status = CarStatus.Approved;
-        car.ApprovedAt = DateTime.UtcNow;
-        car.RejectionReason = null;
-        await _userRepository.UpdateDriverCarAsync(car);
+        if (outcome == CarApprovalOutcome.OriginalUnavailable)
+        {
+            return new ApiResponse<object>
+            {
+                Message = "The original car is no longer eligible for replacement approval."
+            };
+        }
 
         var profile = await _userRepository.GetDriverProfileByIdAsync(car.DriverId);
         if (profile is not null)

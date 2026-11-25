@@ -629,6 +629,52 @@ public class UserRepository : IUserRepository
     }
 
     /// <inheritdoc />
+    public async Task<DriverCar?> GetPendingReplacementForCarAsync(
+        Guid originalCarId,
+        CancellationToken cancellationToken = default)
+    {
+        return await _context.DriverCars
+            .SingleOrDefaultAsync(
+                car => car.ReplacesCarId == originalCarId && car.Status == CarStatus.Pending,
+                cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<CarApprovalOutcome> ApproveDriverCarAsync(Guid carId, DateTime approvedAt)
+    {
+        var strategy = _context.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await _context.Database.BeginTransactionAsync();
+            var car = await _context.DriverCars.SingleOrDefaultAsync(candidate => candidate.Id == carId);
+            if (car is null || car.Status != CarStatus.Pending)
+                return CarApprovalOutcome.NotPending;
+
+            if (car.ReplacesCarId is Guid originalCarId)
+            {
+                var original = await _context.DriverCars.SingleOrDefaultAsync(
+                    candidate => candidate.Id == originalCarId);
+                if (original is null
+                    || original.DriverId != car.DriverId
+                    || original.Status != CarStatus.Approved
+                    || original.ReplacedByCarId is not null)
+                {
+                    return CarApprovalOutcome.OriginalUnavailable;
+                }
+
+                original.ReplacedByCarId = car.Id;
+            }
+
+            car.Status = CarStatus.Approved;
+            car.ApprovedAt = approvedAt;
+            car.RejectionReason = null;
+            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
+            return CarApprovalOutcome.Approved;
+        });
+    }
+
+    /// <inheritdoc />
     public async Task UpdateDriverCarAsync(DriverCar car)
     {
         _context.DriverCars.Update(car);

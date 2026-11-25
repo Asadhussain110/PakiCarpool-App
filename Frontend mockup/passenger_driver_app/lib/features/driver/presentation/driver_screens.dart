@@ -286,6 +286,10 @@ class _CarRegistrationScreenState extends ConsumerState<CarRegistrationScreen> {
         _make.text = editingCar['make']?.toString() ?? '';
         _model.text = editingCar['model']?.toString() ?? '';
         _year.text = editingCar['year']?.toString() ?? '';
+        final savedSeats = editingCar['availableSeats'];
+        if (savedSeats is num && savedSeats >= 1 && savedSeats <= 6) {
+          _seats = savedSeats.toInt();
+        }
       }
       setState(() {
         _statuses = statuses;

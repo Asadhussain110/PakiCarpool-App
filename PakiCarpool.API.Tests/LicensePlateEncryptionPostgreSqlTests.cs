@@ -41,8 +41,8 @@ public sealed class LicensePlateEncryptionPostgreSqlTests
                 Year = 2026,
                 LicensePlate = " test-new-12 ",
                 AvailableSeats = 3,
-                PhotoPaths = ["https://example.com/fake-car-photo.jpg"],
-                RegDocPath = "fake-registration-path"
+                PhotoPaths = [$"private://driver-cars/{fixture.DriverUserId:D}/{Guid.NewGuid():N}.jpg"],
+                RegDocPath = $"private://driver-registration-documents/{fixture.DriverUserId:D}/{Guid.NewGuid():N}.png"
             });
 
         Assert.True(response.IsSuccess);
@@ -182,6 +182,11 @@ public sealed class LicensePlateEncryptionPostgreSqlTests
                     It.IsAny<string>()))
                 .Returns(Task.CompletedTask);
 
+            var storage = new Mock<IStorageService>();
+            storage
+                .Setup(service => service.GetCarPhotoUrl(It.IsAny<string>()))
+                .Returns<string>(path => $"https://storage.invalid/{path}");
+
             return new DriverService(
                 new UserRepository(context),
                 context,
@@ -192,6 +197,7 @@ public sealed class LicensePlateEncryptionPostgreSqlTests
                 new Mock<ITrustService>().Object,
                 new Mock<IEmailService>().Object,
                 _aes,
+                storage.Object,
                 new Mock<IHubContext<Hub>>().Object);
         }
 

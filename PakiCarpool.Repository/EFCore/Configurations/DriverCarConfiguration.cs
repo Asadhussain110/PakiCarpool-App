@@ -50,6 +50,11 @@ public class DriverCarConfiguration : IEntityTypeConfiguration<DriverCar>
         builder.Property(dc => dc.RejectionReason)
             .HasMaxLength(500);
 
+        builder.HasIndex(dc => dc.ReplacesCarId)
+            .IsUnique()
+            .HasDatabaseName("ix_drivercars_pending_replacement")
+            .HasFilter("\"ReplacesCarId\" IS NOT NULL AND \"Status\" = 'Pending'");
+
         builder.Property(dc => dc.CreatedAt)
             .IsRequired();
     }

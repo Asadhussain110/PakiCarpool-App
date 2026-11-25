@@ -67,11 +67,8 @@ public sealed class DriverController : ApiControllerBase
         }
         else if (string.Equals(documentType, "carPhoto", StringComparison.OrdinalIgnoreCase))
         {
-            var extension = contentType == "image/jpeg" ? "jpg" : "png";
-            var objectName = $"{GetUserId():D}/{Guid.NewGuid():N}.{extension}";
-            path = await _storageService.UploadAsync(
-                "driver-cars",
-                objectName,
+            path = await _storageService.UploadCarPhotoAsync(
+                GetUserId(),
                 bytes,
                 contentType,
                 cancellationToken);

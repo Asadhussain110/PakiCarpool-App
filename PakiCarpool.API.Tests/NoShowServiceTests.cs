@@ -561,6 +561,7 @@ public sealed class NoShowServiceTests
                 Trust.Object,
                 Email.Object,
                 new AesEncryptionHelper(configuration),
+                new Mock<IStorageService>().Object,
                 HubContext.Object,
                 timeProvider);
             PassengerService = new PassengerService(

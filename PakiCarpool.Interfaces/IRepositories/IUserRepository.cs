@@ -212,6 +212,13 @@ public interface IUserRepository
     /// </summary>
     Task<DriverCar> CreateDriverCarAsync(DriverCar car);
 
+    Task<DriverCar?> GetPendingReplacementForCarAsync(Guid originalCarId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically approves a pending car and retires its original for new rides.
+    /// </summary>
+    Task<Domain.Enums.CarApprovalOutcome> ApproveDriverCarAsync(Guid carId, DateTime approvedAt);
+
     /// <summary>
     /// Updates an existing driver car record.
     /// </summary>

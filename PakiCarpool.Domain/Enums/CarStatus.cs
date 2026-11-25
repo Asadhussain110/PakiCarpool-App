@@ -6,3 +6,10 @@ public enum CarStatus
     Approved,
     Rejected
 }
+
+public enum CarApprovalOutcome
+{
+    Approved,
+    NotPending,
+    OriginalUnavailable
+}

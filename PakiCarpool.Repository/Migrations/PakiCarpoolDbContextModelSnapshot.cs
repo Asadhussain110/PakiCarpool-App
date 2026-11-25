@@ -218,6 +218,12 @@ namespace PakiCarpool.Repository.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
+                    b.Property<Guid?>("ReplacedByCarId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ReplacesCarId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -229,6 +235,11 @@ namespace PakiCarpool.Repository.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("DriverId");
+
+                    b.HasIndex("ReplacesCarId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_drivercars_pending_replacement")
+                        .HasFilter("\"ReplacesCarId\" IS NOT NULL AND \"Status\" = 'Pending'");
 
                     b.ToTable("DriverCars", null, t =>
                         {

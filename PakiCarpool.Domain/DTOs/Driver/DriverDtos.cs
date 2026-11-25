@@ -3,7 +3,7 @@ using PakiCarpool.Domain.Enums;
 
 namespace PakiCarpool.Domain.DTOs.Driver;
 
-public class RegisterCarDto : IValidatableObject
+public class RegisterCarDto
 {
     [Required]
     [StringLength(50)]
@@ -26,39 +26,21 @@ public class RegisterCarDto : IValidatableObject
     public int AvailableSeats { get; set; }
 
     /// <summary>
-    /// Paths returned by POST /api/v1/driver/car/documents with documentType=carPhoto.
-    /// Base64 image data is not accepted here.
+    /// Canonical storage paths returned by POST /api/v1/driver/car/documents with documentType=carPhoto.
+    /// Ownership and path safety are enforced by the server using the authenticated driver ID.
     /// </summary>
     [Required]
     [MinLength(1)]
     public List<string> PhotoPaths { get; set; } = new();
 
     /// <summary>
-    /// Path returned by POST /api/v1/driver/car/documents with documentType=registration.
-    /// Private registration keys are opaque and are not public URLs.
+    /// Canonical storage path returned by POST /api/v1/driver/car/documents with documentType=registration.
     /// </summary>
     [Required]
     public string RegDocPath { get; set; } = string.Empty;
-
-    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
-    {
-        if (PhotoPaths is null || PhotoPaths.Any(path => !CarDocumentPath.IsUploadedUrl(path)))
-        {
-            yield return new ValidationResult(
-                "Upload each car photo and use the returned URL.",
-                [nameof(PhotoPaths)]);
-        }
-
-        if (!CarDocumentPath.IsRegistrationPath(RegDocPath))
-        {
-            yield return new ValidationResult(
-                "Upload the registration image and use the returned document path.",
-                [nameof(RegDocPath)]);
-        }
-    }
 }
 
-public class UpdateCarDto : IValidatableObject
+public class UpdateCarDto
 {
     [StringLength(50)]
     public string? Make { get; set; }
@@ -76,58 +58,19 @@ public class UpdateCarDto : IValidatableObject
     public int? AvailableSeats { get; set; }
 
     /// <summary>
-    /// Previously uploaded car-photo URLs. New image files must first be sent to
-    /// POST /api/v1/driver/car/documents.
+    /// Canonical car-photo storage paths returned by the upload endpoint.
     /// </summary>
     public List<string>? PhotoPaths { get; set; }
 
     /// <summary>
-    /// Previously uploaded registration-document path; new images must use the upload endpoint.
+    /// Canonical registration-document storage path returned by the upload endpoint.
     /// </summary>
     public string? RegDocPath { get; set; }
-
-    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
-    {
-        if (PhotoPaths is not null && PhotoPaths.Any(path => !CarDocumentPath.IsUploadedUrl(path)))
-        {
-            yield return new ValidationResult(
-                "Upload each car photo and use the returned URL.",
-                [nameof(PhotoPaths)]);
-        }
-
-        if (RegDocPath is not null && !CarDocumentPath.IsRegistrationPath(RegDocPath))
-        {
-            yield return new ValidationResult(
-                "Upload the registration image and use the returned document path.",
-                [nameof(RegDocPath)]);
-        }
-    }
 }
 
 public sealed class CarDocumentUploadResponseDto
 {
     public string Path { get; set; } = string.Empty;
-}
-
-internal static class CarDocumentPath
-{
-    public static bool IsUploadedUrl(string? path) =>
-        !string.IsNullOrWhiteSpace(path)
-        && path.Length <= 2048
-        && Uri.TryCreate(path, UriKind.Absolute, out var uri)
-        && uri.Scheme is "https" or "http";
-
-    public static bool IsRegistrationPath(string? path)
-    {
-        const string prefix = "private://driver-registration-documents/";
-        if (path is null || path.Length > 256 || !path.StartsWith(prefix, StringComparison.Ordinal))
-            return false;
-        var segments = path[prefix.Length..].Split('/');
-        return segments.Length == 2
-            && Guid.TryParse(segments[0], out _)
-            && Guid.TryParseExact(Path.GetFileNameWithoutExtension(segments[1]), "N", out _)
-            && Path.GetExtension(segments[1]) is ".jpg" or ".png";
-    }
 }
 
 public class PostRideDto
@@ -286,6 +229,7 @@ public class CarStatusResponseDto
     public string Make { get; set; } = string.Empty;
     public string Model { get; set; } = string.Empty;
     public int Year { get; set; }
+    public int AvailableSeats { get; set; }
     public string Status { get; set; } = string.Empty;
     public string? RejectionReason { get; set; }
     public DateTime? ApprovedAt { get; set; }

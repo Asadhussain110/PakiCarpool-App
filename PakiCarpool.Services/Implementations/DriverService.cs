@@ -28,6 +28,7 @@ public class DriverService : IDriverService
     private readonly ITrustService _trustService;
     private readonly IEmailService _emailService;
     private readonly AesEncryptionHelper _aesHelper;
+    private readonly IStorageService _storageService;
     private readonly IHubContext<Microsoft.AspNetCore.SignalR.Hub> _hubContext;
     private readonly TimeProvider _timeProvider;
 
@@ -41,6 +42,7 @@ public class DriverService : IDriverService
         ITrustService trustService,
         IEmailService emailService,
         AesEncryptionHelper aesHelper,
+        IStorageService storageService,
         IHubContext<Microsoft.AspNetCore.SignalR.Hub> hubContext,
         TimeProvider? timeProvider = null)
     {
@@ -53,6 +55,7 @@ public class DriverService : IDriverService
         _trustService = trustService;
         _emailService = emailService;
         _aesHelper = aesHelper;
+        _storageService = storageService;
         _hubContext = hubContext;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -62,14 +65,23 @@ public class DriverService : IDriverService
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Registers a new car for the driver. The EF value converter encrypts the license plate.
-    /// Car status defaults to Pending — requires admin approval.
+    /// Registers a new car using only validated storage evidence owned by the current driver.
+    /// The EF value converter encrypts the license plate. Car status defaults to Pending.
     /// </summary>
     public async Task<ApiResponse<CarStatusResponseDto>> RegisterCarAsync(Guid driverId, RegisterCarDto dto)
     {
         var profile = await _userRepository.GetDriverProfileByUserIdAsync(driverId);
         if (profile is null)
             return new ApiResponse<CarStatusResponseDto> { Message = "Driver profile not found." };
+
+        var validationError = ValidateCarEvidence(
+            driverId,
+            dto.PhotoPaths,
+            requirePhotos: true,
+            dto.RegDocPath,
+            requireRegistration: true);
+        if (validationError is not null)
+            return ApiResponse<CarStatusResponseDto>.Failure(ErrorCodes.ValidationError, validationError);
 
         var car = new DriverCar
         {
@@ -81,7 +93,7 @@ public class DriverService : IDriverService
             LicensePlate = dto.LicensePlate.Trim().ToUpperInvariant(),
             AvailableSeats = dto.AvailableSeats,
             Status = CarStatus.Pending,
-            PhotoPaths = System.Text.Json.JsonSerializer.Serialize(dto.PhotoPaths),
+            PhotoPaths = System.Text.Json.JsonSerializer.Serialize(BuildPhotoUrls(dto.PhotoPaths)),
             RegDocPath = dto.RegDocPath,
             CreatedAt = DateTime.UtcNow
         };
@@ -103,7 +115,8 @@ public class DriverService : IDriverService
     }
 
     /// <summary>
-    /// Updates an existing car's details. Resets status to Pending for re-approval.
+    /// Updates a Pending/Rejected car in place. Editing an Approved car creates or updates
+    /// a separate Pending replacement, leaving the original and its existing rides untouched.
     /// </summary>
     public async Task<ApiResponse<CarStatusResponseDto>> UpdateCarAsync(Guid driverId, Guid carId, UpdateCarDto dto)
     {
@@ -111,31 +124,124 @@ public class DriverService : IDriverService
         if (profile is null)
             return new ApiResponse<CarStatusResponseDto> { Message = "Driver profile not found." };
 
-        var car = await _userRepository.GetDriverCarByIdAsync(carId);
-        if (car is null || car.DriverId != profile.Id)
+        var original = await _userRepository.GetDriverCarByIdAsync(carId);
+        if (original is null || original.DriverId != profile.Id)
             return new ApiResponse<CarStatusResponseDto> { Message = "Car not found." };
 
+        if (original.ReplacedByCarId is not null)
+        {
+            return ApiResponse<CarStatusResponseDto>.Failure(
+                ErrorCodes.ValidationError,
+                "This car has been replaced. Edit its approved replacement instead.");
+        }
+
+        var validationError = ValidateCarEvidence(
+            driverId,
+            dto.PhotoPaths,
+            requirePhotos: false,
+            dto.RegDocPath,
+            requireRegistration: false);
+        if (validationError is not null)
+            return ApiResponse<CarStatusResponseDto>.Failure(ErrorCodes.ValidationError, validationError);
+
+        DriverCar target;
+        var createReplacement = false;
+        if (original.Status == CarStatus.Approved)
+        {
+            var pendingReplacement = await _userRepository.GetPendingReplacementForCarAsync(original.Id);
+            if (pendingReplacement is null)
+            {
+                target = CreatePendingReplacement(original);
+                createReplacement = true;
+            }
+            else
+            {
+                target = pendingReplacement;
+            }
+        }
+        else
+        {
+            target = original;
+        }
+
+        ApplyCarUpdates(target, dto);
+        if (dto.PhotoPaths is not null)
+            target.PhotoPaths = System.Text.Json.JsonSerializer.Serialize(BuildPhotoUrls(dto.PhotoPaths));
+        target.Status = CarStatus.Pending;
+        target.RejectionReason = null;
+        target.ApprovedAt = null;
+
+        if (createReplacement)
+            await _userRepository.CreateDriverCarAsync(target);
+        else
+            await _userRepository.UpdateDriverCarAsync(target);
+
+        return ApiResponse<CarStatusResponseDto>.Success(
+            MapCarToStatusDto(target),
+            createReplacement
+                ? "Replacement car submitted. Your approved car remains available pending review."
+                : "Car updated. Awaiting admin re-approval.");
+    }
+
+    private static DriverCar CreatePendingReplacement(DriverCar original) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            DriverId = original.DriverId,
+            Make = original.Make,
+            Model = original.Model,
+            Year = original.Year,
+            LicensePlate = original.LicensePlate,
+            AvailableSeats = original.AvailableSeats,
+            Status = CarStatus.Pending,
+            PhotoPaths = original.PhotoPaths,
+            RegDocPath = original.RegDocPath,
+            ReplacesCarId = original.Id,
+            CreatedAt = DateTime.UtcNow
+        };
+
+    private static void ApplyCarUpdates(DriverCar car, UpdateCarDto dto)
+    {
         if (dto.Make is not null) car.Make = dto.Make.Trim();
         if (dto.Model is not null) car.Model = dto.Model.Trim();
         if (dto.Year.HasValue) car.Year = dto.Year.Value;
         if (dto.LicensePlate is not null)
             car.LicensePlate = dto.LicensePlate.Trim().ToUpperInvariant();
         if (dto.AvailableSeats.HasValue) car.AvailableSeats = dto.AvailableSeats.Value;
-        if (dto.PhotoPaths is not null)
-            car.PhotoPaths = System.Text.Json.JsonSerializer.Serialize(dto.PhotoPaths);
         if (dto.RegDocPath is not null) car.RegDocPath = dto.RegDocPath;
-
-        // Reset to Pending for re-approval
-        car.Status = CarStatus.Pending;
-        car.RejectionReason = null;
-        car.ApprovedAt = null;
-
-        await _userRepository.UpdateDriverCarAsync(car);
-
-        return ApiResponse<CarStatusResponseDto>.Success(
-            MapCarToStatusDto(car),
-            "Car updated. Awaiting admin re-approval.");
     }
+
+    private string? ValidateCarEvidence(
+        Guid driverUserId,
+        IEnumerable<string>? photoPaths,
+        bool requirePhotos,
+        string? registrationPath,
+        bool requireRegistration)
+    {
+        if (requirePhotos && photoPaths is null)
+            return "Upload at least one car photo and use its returned storage path.";
+
+        if (photoPaths is not null)
+        {
+            if (requirePhotos && !photoPaths.Any())
+                return "Upload at least one car photo and use its returned storage path.";
+            if (photoPaths.Any(path => !CarStoragePath.IsPhotoPath(path, driverUserId)))
+            {
+                return "Car photo paths must come from the car-photo upload endpoint and belong to the current driver.";
+            }
+        }
+
+        if ((requireRegistration || registrationPath is not null)
+            && !CarStoragePath.IsRegistrationPath(registrationPath, driverUserId))
+        {
+            return "The registration document path must come from the registration upload endpoint and belong to the current driver.";
+        }
+
+        return null;
+    }
+
+    private List<string>? BuildPhotoUrls(IEnumerable<string>? photoPaths) =>
+        photoPaths?.Select(path => _storageService.GetCarPhotoUrl(path)).ToList();
 
     /// <summary>
     /// Returns the current approval status of all cars registered by the driver.
@@ -188,7 +294,8 @@ public class DriverService : IDriverService
 
                 // Must have at least one approved car
                 var cars = await _userRepository.GetDriverCarsAsync(profile.Id);
-                var approvedCar = cars.FirstOrDefault(c => c.Status == CarStatus.Approved);
+                var approvedCar = cars.FirstOrDefault(c =>
+                    c.Status == CarStatus.Approved && c.ReplacedByCarId is null);
                 if (approvedCar is null)
                     return await RollbackWithErrorAsync(ErrorCodes.CarNotApproved);
 
@@ -1011,6 +1118,7 @@ public class DriverService : IDriverService
             Make = car.Make,
             Model = car.Model,
             Year = car.Year,
+            AvailableSeats = car.AvailableSeats,
             Status = car.Status.ToString(),
             RejectionReason = car.RejectionReason,
             ApprovedAt = car.ApprovedAt
