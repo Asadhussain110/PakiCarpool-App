@@ -62,7 +62,7 @@ public class DriverService : IDriverService
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Registers a new car for the driver. Encrypts license plate with AES-256.
+    /// Registers a new car for the driver. The EF value converter encrypts the license plate.
     /// Car status defaults to Pending — requires admin approval.
     /// </summary>
     public async Task<ApiResponse<CarStatusResponseDto>> RegisterCarAsync(Guid driverId, RegisterCarDto dto)
@@ -71,8 +71,6 @@ public class DriverService : IDriverService
         if (profile is null)
             return new ApiResponse<CarStatusResponseDto> { Message = "Driver profile not found." };
 
-        var encryptedPlate = _aesHelper.Encrypt(dto.LicensePlate.Trim().ToUpperInvariant());
-
         var car = new DriverCar
         {
             Id = Guid.NewGuid(),
@@ -80,7 +78,7 @@ public class DriverService : IDriverService
             Make = dto.Make.Trim(),
             Model = dto.Model.Trim(),
             Year = dto.Year,
-            LicensePlate = encryptedPlate,
+            LicensePlate = dto.LicensePlate.Trim().ToUpperInvariant(),
             AvailableSeats = dto.AvailableSeats,
             Status = CarStatus.Pending,
             PhotoPaths = System.Text.Json.JsonSerializer.Serialize(dto.PhotoPaths),
@@ -121,7 +119,7 @@ public class DriverService : IDriverService
         if (dto.Model is not null) car.Model = dto.Model.Trim();
         if (dto.Year.HasValue) car.Year = dto.Year.Value;
         if (dto.LicensePlate is not null)
-            car.LicensePlate = _aesHelper.Encrypt(dto.LicensePlate.Trim().ToUpperInvariant());
+            car.LicensePlate = dto.LicensePlate.Trim().ToUpperInvariant();
         if (dto.AvailableSeats.HasValue) car.AvailableSeats = dto.AvailableSeats.Value;
         if (dto.PhotoPaths is not null)
             car.PhotoPaths = System.Text.Json.JsonSerializer.Serialize(dto.PhotoPaths);

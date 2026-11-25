@@ -75,10 +75,15 @@ public class PakiCarpoolDbContext : DbContext
                 _encryptionKeys,
                 _activeEncryptionVersion,
                 _legacyCbcKey);
+            var licensePlateConverter = new EncryptedStringConverter(
+                _encryptionKeys,
+                _activeEncryptionVersion,
+                _legacyCbcKey,
+                tolerateDoubleEncryption: true);
 
             modelBuilder.Entity<DriverCar>()
                 .Property(e => e.LicensePlate)
-                .HasConversion(converter);
+                .HasConversion(licensePlateConverter);
 
             modelBuilder.Entity<TotpSecret>()
                 .Property(e => e.Secret)

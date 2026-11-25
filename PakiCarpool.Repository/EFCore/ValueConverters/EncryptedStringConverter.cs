@@ -21,13 +21,18 @@ public sealed class EncryptedStringConverter : ValueConverter<string, string>
     public EncryptedStringConverter(
         IReadOnlyDictionary<byte, string> base64Keys,
         byte activeVersion,
-        string legacyCbcBase64Key)
-        : this(CreateSettings(base64Keys, activeVersion, legacyCbcBase64Key))
+        string legacyCbcBase64Key,
+        bool tolerateDoubleEncryption = false)
+        : this(
+            CreateSettings(base64Keys, activeVersion, legacyCbcBase64Key),
+            tolerateDoubleEncryption)
     {
     }
 
-    private EncryptedStringConverter(EncryptionSettings settings)
-        : base(value => Encrypt(value, settings), value => Decrypt(value, settings))
+    private EncryptedStringConverter(EncryptionSettings settings, bool tolerateDoubleEncryption)
+        : base(
+            value => Encrypt(value, settings),
+            value => Decrypt(value, settings, tolerateDoubleEncryption))
     {
     }
 
@@ -48,6 +53,52 @@ public sealed class EncryptedStringConverter : ValueConverter<string, string>
             throw new InvalidOperationException("The legacy AES encryption key must be a Base64-encoded 256-bit key.");
 
         return new EncryptionSettings(keys, activeVersion, legacyCbcBytes);
+    }
+
+    /// <summary>
+    /// Returns the existing inner ciphertext for a legacy double-encrypted plate.
+    /// Single-layer values are returned unchanged with a false result.
+    /// </summary>
+    public static bool TryRemoveDoubleEncryption(
+        string ciphertext,
+        IReadOnlyDictionary<byte, string> base64Keys,
+        byte activeVersion,
+        string legacyCbcBase64Key,
+        out string singleLayerCiphertext)
+    {
+        var settings = CreateSettings(base64Keys, activeVersion, legacyCbcBase64Key);
+        var decryptedOnce = DecryptSingleLayer(ciphertext, settings);
+        if (TryDecryptNested(decryptedOnce, settings, out _))
+        {
+            singleLayerCiphertext = decryptedOnce;
+            return true;
+        }
+
+        singleLayerCiphertext = ciphertext;
+        return false;
+    }
+
+    /// <summary>
+    /// Re-applies the removed outer layer when rolling back the data migration.
+    /// Existing double-encrypted values are returned unchanged with a false result.
+    /// </summary>
+    public static bool TryRestoreDoubleEncryption(
+        string ciphertext,
+        IReadOnlyDictionary<byte, string> base64Keys,
+        byte activeVersion,
+        string legacyCbcBase64Key,
+        out string doubleLayerCiphertext)
+    {
+        var settings = CreateSettings(base64Keys, activeVersion, legacyCbcBase64Key);
+        var decryptedOnce = DecryptSingleLayer(ciphertext, settings);
+        if (TryDecryptNested(decryptedOnce, settings, out _))
+        {
+            doubleLayerCiphertext = ciphertext;
+            return false;
+        }
+
+        doubleLayerCiphertext = Encrypt(ciphertext, settings);
+        return true;
     }
 
     private static string Encrypt(string plaintext, EncryptionSettings settings)
@@ -74,7 +125,18 @@ public sealed class EncryptedStringConverter : ValueConverter<string, string>
         return Convert.ToBase64String(payload);
     }
 
-    private static string Decrypt(string ciphertext, EncryptionSettings settings)
+    private static string Decrypt(
+        string ciphertext,
+        EncryptionSettings settings,
+        bool tolerateDoubleEncryption)
+    {
+        var plaintext = DecryptSingleLayer(ciphertext, settings);
+        return tolerateDoubleEncryption && TryDecryptNested(plaintext, settings, out var nestedPlaintext)
+            ? nestedPlaintext
+            : plaintext;
+    }
+
+    private static string DecryptSingleLayer(string ciphertext, EncryptionSettings settings)
     {
         if (string.IsNullOrEmpty(ciphertext))
             return ciphertext;
@@ -136,6 +198,46 @@ public sealed class EncryptedStringConverter : ValueConverter<string, string>
         }
         catch (DecoderFallbackException)
         {
+            return false;
+        }
+    }
+
+    private static bool TryDecryptNested(
+        string value,
+        EncryptionSettings settings,
+        out string plaintext)
+    {
+        plaintext = string.Empty;
+        byte[] payload;
+        try
+        {
+            payload = Convert.FromBase64String(value);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        if (HasMagic(payload))
+        {
+            plaintext = DecryptCurrent(payload, settings);
+            return true;
+        }
+
+        if (TryDecryptLegacyGcm(payload, settings, out plaintext))
+            return true;
+
+        if (payload.Length < 32 || (payload.Length - 16) % 16 != 0)
+            return false;
+
+        try
+        {
+            plaintext = DecryptLegacyCbc(payload, settings.LegacyCbcKey);
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            plaintext = string.Empty;
             return false;
         }
     }
