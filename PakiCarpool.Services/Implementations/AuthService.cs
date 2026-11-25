@@ -2,8 +2,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Google.Apis.Auth;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using PakiCarpool.Common.Constants;
 using PakiCarpool.Domain.DTOs.Auth;
 using PakiCarpool.Domain.DTOs.Common;
@@ -127,7 +129,16 @@ public class AuthService : IAuthService
             }
             : null;
 
-        var createdUser = await _userRepository.CreateWithDriverProfileAsync(user, driverProfile);
+        User createdUser;
+        try
+        {
+            createdUser = await _userRepository.CreateWithDriverProfileAsync(user, driverProfile);
+        }
+        catch (DbUpdateException exception) when (IsDuplicateEmailViolation(exception))
+        {
+            return DuplicateEmail<object>();
+        }
+
         await _emailService.SendEmailOtpAsync(createdUser.Email, createdUser.FullName, otp);
 
         return ApiResponse<object>.SuccessMessage("Check your email for the verification code.");
@@ -672,8 +683,16 @@ public class AuthService : IAuthService
                 AverageRating = 0m
             }
             : null;
-        var createdUser = await _userRepository.CreateWithDriverProfileAsync(
-            newUser, googleDriverProfile, cancellationToken);
+        User createdUser;
+        try
+        {
+            createdUser = await _userRepository.CreateWithDriverProfileAsync(
+                newUser, googleDriverProfile, cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsDuplicateEmailViolation(exception))
+        {
+            return DuplicateEmail<AuthResponseDto>();
+        }
 
         if (role == UserRole.Driver)
             return await IssueDriverLivenessPendingAsync(createdUser, cancellationToken);
@@ -875,6 +894,18 @@ public class AuthService : IAuthService
 
         return await RecordLoginFailureAsync<T>(user);
     }
+
+    private static bool IsDuplicateEmailViolation(DbUpdateException exception)
+        => exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            ConstraintName: "IX_Users_Email" or "IX_Users_Email_Lower"
+        };
+
+    private static ApiResponse<T> DuplicateEmail<T>()
+        => ApiResponse<T>.Failure(
+            ErrorCodes.ValidationError,
+            "An account with this email already exists.");
 
     private static ApiResponse<T> InvalidCredentials<T>()
     {

@@ -71,13 +71,19 @@ namespace PakiCarpool.Repository.Migrations
 
                     b.HasIndex("DropoffStopId");
 
-                    b.HasIndex("PassengerId");
-
                     b.HasIndex("PickupStopId");
 
                     b.HasIndex("RideId");
 
                     b.HasIndex("Status");
+
+                    b.HasIndex(new[] { "PassengerId" }, "IX_Bookings_PassengerId")
+                        .HasDatabaseName("IX_Bookings_PassengerId");
+
+                    b.HasIndex(new[] { "PassengerId" }, "ix_bookings_active_passenger")
+                        .IsUnique()
+                        .HasDatabaseName("ix_bookings_active_passenger")
+                        .HasFilter("\"Status\" IN ('Pending', 'Accepted', 'Active')");
 
                     b.ToTable("Bookings", (string)null);
                 });
@@ -158,6 +164,10 @@ namespace PakiCarpool.Repository.Migrations
                     b.HasIndex("BookingId");
 
                     b.HasIndex("ExpiresAt");
+
+                    b.HasIndex("ReceiverId");
+
+                    b.HasIndex("SenderId");
 
                     b.ToTable("ChatMessages", (string)null);
                 });
@@ -249,10 +259,17 @@ namespace PakiCarpool.Repository.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("RideId");
+
                     b.HasIndex("DriverId", "RideId")
                         .IsUnique();
 
-                    b.ToTable("DriverLocations", (string)null);
+                    b.ToTable("DriverLocations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_DriverLocations_Latitude", "\"Latitude\" >= -90 AND \"Latitude\" <= 90");
+
+                            t.HasCheckConstraint("CK_DriverLocations_Longitude", "\"Longitude\" >= -180 AND \"Longitude\" <= 180");
+                        });
                 });
 
             modelBuilder.Entity("PakiCarpool.Domain.Models.DriverProfile", b =>
@@ -331,6 +348,12 @@ namespace PakiCarpool.Repository.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("ReporteeId");
+
+                    b.HasIndex("ReporterId");
+
+                    b.HasIndex("RideId");
+
                     b.HasIndex("Status");
 
                     b.ToTable("Flags", (string)null);
@@ -408,6 +431,10 @@ namespace PakiCarpool.Repository.Migrations
 
                     b.HasIndex("OffenderId");
 
+                    b.HasIndex("ReporterId");
+
+                    b.HasIndex("RideId");
+
                     b.ToTable("NoShowLogs", (string)null);
                 });
 
@@ -438,10 +465,17 @@ namespace PakiCarpool.Repository.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("RateeId");
+
+                    b.HasIndex("RaterId");
+
                     b.HasIndex("RideId", "RaterId", "RateeId")
                         .IsUnique();
 
-                    b.ToTable("Ratings", (string)null);
+                    b.ToTable("Ratings", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Ratings_Stars", "\"Stars\" >= 1 AND \"Stars\" <= 5");
+                        });
                 });
 
             modelBuilder.Entity("PakiCarpool.Domain.Models.RefreshToken", b =>
@@ -527,9 +561,19 @@ namespace PakiCarpool.Repository.Migrations
 
                     b.HasIndex("CarId");
 
+                    b.HasIndex("DriverId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_rides_active_driver")
+                        .HasFilter("\"Status\" IN ('Posted', 'Active')");
+
                     b.HasIndex("DriverId", "Status");
 
-                    b.ToTable("Rides", (string)null);
+                    b.ToTable("Rides", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Rides_Fare", "\"Fare\" >= 0");
+
+                            t.HasCheckConstraint("CK_Rides_MaxSeats", "\"MaxSeats\" >= 1 AND \"MaxSeats\" <= 6");
+                        });
                 });
 
             modelBuilder.Entity("PakiCarpool.Domain.Models.RideStop", b =>
@@ -571,7 +615,12 @@ namespace PakiCarpool.Repository.Migrations
                         .IsUnique()
                         .HasDatabaseName("IX_RideStops_RideId_SequenceOrder_Unique");
 
-                    b.ToTable("RideStops", (string)null);
+                    b.ToTable("RideStops", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RideStops_Latitude", "\"Latitude\" >= -90 AND \"Latitude\" <= 90");
+
+                            t.HasCheckConstraint("CK_RideStops_Longitude", "\"Longitude\" >= -180 AND \"Longitude\" <= 180");
+                        });
                 });
 
             modelBuilder.Entity("PakiCarpool.Domain.Models.TotpSecret", b =>
@@ -764,12 +813,33 @@ namespace PakiCarpool.Repository.Migrations
                     b.Navigation("Ride");
                 });
 
+            modelBuilder.Entity("PakiCarpool.Domain.Models.CancellationLog", b =>
+                {
+                    b.HasOne("PakiCarpool.Domain.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("PakiCarpool.Domain.Models.ChatMessage", b =>
                 {
                     b.HasOne("PakiCarpool.Domain.Models.Booking", "Booking")
                         .WithMany("ChatMessages")
                         .HasForeignKey("BookingId")
                         .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("PakiCarpool.Domain.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("ReceiverId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PakiCarpool.Domain.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("SenderId")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Booking");
@@ -786,6 +856,21 @@ namespace PakiCarpool.Repository.Migrations
                     b.Navigation("Driver");
                 });
 
+            modelBuilder.Entity("PakiCarpool.Domain.Models.DriverLocation", b =>
+                {
+                    b.HasOne("PakiCarpool.Domain.Models.DriverProfile", null)
+                        .WithMany()
+                        .HasForeignKey("DriverId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PakiCarpool.Domain.Models.Ride", null)
+                        .WithMany()
+                        .HasForeignKey("RideId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("PakiCarpool.Domain.Models.DriverProfile", b =>
                 {
                     b.HasOne("PakiCarpool.Domain.Models.User", "User")
@@ -797,6 +882,27 @@ namespace PakiCarpool.Repository.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("PakiCarpool.Domain.Models.Flag", b =>
+                {
+                    b.HasOne("PakiCarpool.Domain.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("ReporteeId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PakiCarpool.Domain.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("ReporterId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PakiCarpool.Domain.Models.Ride", null)
+                        .WithMany()
+                        .HasForeignKey("RideId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("PakiCarpool.Domain.Models.LivenessChallenge", b =>
                 {
                     b.HasOne("PakiCarpool.Domain.Models.User", "Driver")
@@ -806,6 +912,53 @@ namespace PakiCarpool.Repository.Migrations
                         .IsRequired();
 
                     b.Navigation("Driver");
+                });
+
+            modelBuilder.Entity("PakiCarpool.Domain.Models.NoShowLog", b =>
+                {
+                    b.HasOne("PakiCarpool.Domain.Models.Booking", null)
+                        .WithMany()
+                        .HasForeignKey("BookingId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("PakiCarpool.Domain.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("OffenderId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PakiCarpool.Domain.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("ReporterId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PakiCarpool.Domain.Models.Ride", null)
+                        .WithMany()
+                        .HasForeignKey("RideId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("PakiCarpool.Domain.Models.Rating", b =>
+                {
+                    b.HasOne("PakiCarpool.Domain.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("RateeId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PakiCarpool.Domain.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("RaterId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PakiCarpool.Domain.Models.Ride", null)
+                        .WithMany()
+                        .HasForeignKey("RideId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("PakiCarpool.Domain.Models.RefreshToken", b =>

@@ -8,7 +8,11 @@ public class RideConfiguration : IEntityTypeConfiguration<Ride>
 {
     public void Configure(EntityTypeBuilder<Ride> builder)
     {
-        builder.ToTable("Rides");
+        builder.ToTable("Rides", t =>
+        {
+            t.HasCheckConstraint("CK_Rides_Fare", "\"Fare\" >= 0");
+            t.HasCheckConstraint("CK_Rides_MaxSeats", "\"MaxSeats\" >= 1 AND \"MaxSeats\" <= 6");
+        });
 
         builder.HasKey(r => r.Id);
 
@@ -35,6 +39,11 @@ public class RideConfiguration : IEntityTypeConfiguration<Ride>
             .HasMaxLength(20);
 
         builder.HasIndex(r => new { r.DriverId, r.Status });
+
+        builder.HasIndex(r => r.DriverId)
+            .IsUnique()
+            .HasDatabaseName("ix_rides_active_driver")
+            .HasFilter("\"Status\" IN ('Posted', 'Active')");
 
         builder.Property(r => r.CancelGraceExpiresAt)
             .IsRequired();

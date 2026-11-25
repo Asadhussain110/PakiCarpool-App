@@ -8,9 +8,27 @@ public class RatingConfiguration : IEntityTypeConfiguration<Rating>
 {
     public void Configure(EntityTypeBuilder<Rating> builder)
     {
-        builder.ToTable("Ratings");
+        builder.ToTable("Ratings", t =>
+        {
+            t.HasCheckConstraint("CK_Ratings_Stars", "\"Stars\" >= 1 AND \"Stars\" <= 5");
+        });
 
         builder.HasKey(r => r.Id);
+
+        builder.HasOne<Ride>()
+            .WithMany()
+            .HasForeignKey(r => r.RideId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(r => r.RaterId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(r => r.RateeId)
+            .OnDelete(DeleteBehavior.Restrict);
 
         builder.Property(r => r.RideId)
             .IsRequired();

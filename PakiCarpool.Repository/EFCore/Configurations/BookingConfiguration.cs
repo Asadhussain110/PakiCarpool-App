@@ -33,7 +33,12 @@ public class BookingConfiguration : IEntityTypeConfiguration<Booking>
             .HasMaxLength(20);
 
         builder.HasIndex(b => b.RideId);
-        builder.HasIndex(b => b.PassengerId);
+        builder.HasIndex(b => b.PassengerId, "IX_Bookings_PassengerId")
+            .HasDatabaseName("IX_Bookings_PassengerId");
+        builder.HasIndex(b => b.PassengerId, "ix_bookings_active_passenger")
+            .IsUnique()
+            .HasDatabaseName("ix_bookings_active_passenger")
+            .HasFilter("\"Status\" IN ('Pending', 'Accepted', 'Active')");
         builder.HasIndex(b => b.Status);
 
         builder.Property(b => b.RequestedAt)

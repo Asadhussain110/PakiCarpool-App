@@ -12,6 +12,11 @@ public class CancellationLogConfiguration : IEntityTypeConfiguration<Cancellatio
 
         builder.HasKey(cl => cl.Id);
 
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(cl => cl.UserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.Property(cl => cl.UserId)
             .IsRequired();
 

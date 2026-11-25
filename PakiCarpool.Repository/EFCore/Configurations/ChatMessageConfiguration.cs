@@ -12,6 +12,16 @@ public class ChatMessageConfiguration : IEntityTypeConfiguration<ChatMessage>
 
         builder.HasKey(cm => cm.Id);
 
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(cm => cm.SenderId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(cm => cm.ReceiverId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.Property(cm => cm.SenderId)
             .IsRequired();
 

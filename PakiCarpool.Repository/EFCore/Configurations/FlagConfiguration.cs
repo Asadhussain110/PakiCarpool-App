@@ -12,6 +12,21 @@ public class FlagConfiguration : IEntityTypeConfiguration<Flag>
 
         builder.HasKey(f => f.Id);
 
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(f => f.ReporterId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(f => f.ReporteeId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Ride>()
+            .WithMany()
+            .HasForeignKey(f => f.RideId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.Property(f => f.ReporterId)
             .IsRequired();
 

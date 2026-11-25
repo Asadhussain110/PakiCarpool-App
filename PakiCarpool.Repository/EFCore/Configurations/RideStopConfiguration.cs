@@ -9,7 +9,11 @@ public class RideStopConfiguration : IEntityTypeConfiguration<RideStop>
 {
     public void Configure(EntityTypeBuilder<RideStop> builder)
     {
-        builder.ToTable("RideStops");
+        builder.ToTable("RideStops", t =>
+        {
+            t.HasCheckConstraint("CK_RideStops_Latitude", "\"Latitude\" >= -90 AND \"Latitude\" <= 90");
+            t.HasCheckConstraint("CK_RideStops_Longitude", "\"Longitude\" >= -180 AND \"Longitude\" <= 180");
+        });
 
         builder.HasKey(rs => rs.Id);
 

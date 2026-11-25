@@ -8,9 +8,23 @@ public class DriverLocationConfiguration : IEntityTypeConfiguration<DriverLocati
 {
     public void Configure(EntityTypeBuilder<DriverLocation> builder)
     {
-        builder.ToTable("DriverLocations");
+        builder.ToTable("DriverLocations", t =>
+        {
+            t.HasCheckConstraint("CK_DriverLocations_Latitude", "\"Latitude\" >= -90 AND \"Latitude\" <= 90");
+            t.HasCheckConstraint("CK_DriverLocations_Longitude", "\"Longitude\" >= -180 AND \"Longitude\" <= 180");
+        });
 
         builder.HasKey(dl => dl.Id);
+
+        builder.HasOne<DriverProfile>()
+            .WithMany()
+            .HasForeignKey(dl => dl.DriverId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Ride>()
+            .WithMany()
+            .HasForeignKey(dl => dl.RideId)
+            .OnDelete(DeleteBehavior.Restrict);
 
         builder.Property(dl => dl.Latitude)
             .IsRequired();

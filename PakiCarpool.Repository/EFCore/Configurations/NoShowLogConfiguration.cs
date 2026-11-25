@@ -12,6 +12,26 @@ public class NoShowLogConfiguration : IEntityTypeConfiguration<NoShowLog>
 
         builder.HasKey(ns => ns.Id);
 
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(ns => ns.ReporterId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(ns => ns.OffenderId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Ride>()
+            .WithMany()
+            .HasForeignKey(ns => ns.RideId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Booking>()
+            .WithMany()
+            .HasForeignKey(ns => ns.BookingId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.Property(ns => ns.ReporterId)
             .IsRequired();
 
