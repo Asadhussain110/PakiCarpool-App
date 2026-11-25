@@ -79,8 +79,8 @@ public interface IBookingRepository
     Task UpdateAsync(Booking booking);
 
     /// <summary>
-    /// Checks seat capacity for a specific segment using Dapper.
-    /// Returns the count of overlapping accepted/active bookings.
+    /// Checks seat capacity for a specific segment range using Dapper.
+    /// Returns the maximum pending/accepted/active occupancy on any route segment in the range.
     /// </summary>
     Task<int> GetOverlappingBookingCountAsync(Guid rideId, int requestedPickupOrder, int requestedDropoffOrder);
 

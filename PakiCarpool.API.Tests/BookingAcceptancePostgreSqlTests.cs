@@ -16,7 +16,7 @@ public sealed class BookingAcceptancePostgreSqlTests
     public const string ConnectionStringEnvironmentVariable = "PAKICARPOOL_TEST_CONNECTIONSTRING";
 
     [PostgreSqlFact]
-    public async Task ConcurrentAcceptance_OnLastSeat_OnlyOneSucceeds()
+    public async Task ConcurrentAcceptance_WithPendingCompetitor_NeitherOverbooks()
     {
         await using var fixture = await PostgreSqlFixture.CreateAsync(maxSeats: 1, bookingCount: 2);
         await using var firstContext = fixture.CreateContext();
@@ -38,13 +38,31 @@ public sealed class BookingAcceptancePostgreSqlTests
         start.SetResult();
         var results = await Task.WhenAll(firstAttempt, secondAttempt);
 
-        Assert.Single(results, result => result.Outcome == BookingAcceptanceOutcome.Accepted);
-        Assert.Single(results, result => result.Outcome == BookingAcceptanceOutcome.SegmentFull);
+        Assert.All(results, result => Assert.Equal(BookingAcceptanceOutcome.SegmentFull, result.Outcome));
         await using var verificationContext = fixture.CreateContext();
         Assert.Equal(
-            1,
+            0,
             await verificationContext.Bookings.CountAsync(b =>
                 b.RideId == fixture.Ride.Id && b.Status == BookingStatus.Accepted));
+        Assert.Equal(
+            2,
+            await verificationContext.Bookings.CountAsync(b =>
+                b.RideId == fixture.Ride.Id && b.Status == BookingStatus.Pending));
+    }
+
+    [PostgreSqlFact]
+    public async Task Acceptance_WithAvailableSegment_SucceedsWithoutCountingItself()
+    {
+        await using var fixture = await PostgreSqlFixture.CreateAsync(maxSeats: 1);
+        await using var context = fixture.CreateContext();
+        var repository = fixture.CreateRepository(context);
+
+        var result = await repository.AcceptPendingAsync(fixture.Bookings[0].Id, DateTime.UtcNow);
+
+        Assert.Equal(BookingAcceptanceOutcome.Accepted, result.Outcome);
+        var persisted = await context.Bookings.AsNoTracking().SingleAsync(b => b.Id == fixture.Bookings[0].Id);
+        Assert.Equal(BookingStatus.Accepted, persisted.Status);
+        Assert.NotNull(persisted.AcceptedAt);
     }
 
     [PostgreSqlFact]

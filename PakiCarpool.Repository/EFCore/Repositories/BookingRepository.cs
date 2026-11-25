@@ -168,7 +168,8 @@ public class BookingRepository : IBookingRepository
                 booking.DropoffStop.SequenceOrder,
                 _context.Database.GetDbConnection(),
                 transaction.GetDbTransaction(),
-                cancellationToken);
+                cancellationToken,
+                excludedBookingId: booking.Id);
             if (overlapping >= ride.MaxSeats)
                 return (BookingAcceptanceOutcome.SegmentFull, booking);
 

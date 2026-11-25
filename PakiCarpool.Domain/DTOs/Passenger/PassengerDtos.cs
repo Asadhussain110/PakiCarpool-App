@@ -63,6 +63,8 @@ public class RideSearchCandidateDto
     public DateTime DepartureTime { get; set; }
     public int MaxSeats { get; set; }
     public int AvailableSeats { get; set; }
+    public Guid PairStartStopId { get; set; }
+    public Guid PairEndStopId { get; set; }
     public Guid StopId { get; set; }
     public string StopName { get; set; } = string.Empty;
     public double Latitude { get; set; }
